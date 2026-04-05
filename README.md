@@ -21,9 +21,10 @@ A macOS menu bar app that turns a handful of Apple Silicon Macs into a distribut
 ```
 
 1. Define your training job in a `distribute-metal.yaml` at your project root.
-2. The coordinator discovers peers via Bonjour, syncs your code and data, provisions a `uv` virtual environment on each Mac, and launches `torchrun` with consistent ranks.
-3. MCCL handles gradient all-reduce over Metal Performance Shaders across the network.
-4. When the job finishes, workspaces are cleaned up automatically.
+2. Start the Python agent on each Mac you want in the cluster.
+3. The coordinator (menu bar app) discovers peers via Bonjour, provisions a `uv` virtual environment on each Mac, and launches `torchrun` with consistent ranks.
+4. MCCL handles gradient all-reduce over Metal Performance Shaders across the network.
+5. When the job finishes, you can clean up workspaces from the menu bar.
 
 ## Requirements
 
@@ -105,11 +106,109 @@ cleanup:
   retain_logs_days: 7
 ```
 
-Or let the MCP generate one for you -- see [MCP integration](#mcp-integration) below.
+Or let the MCP generate one for you; see [MCP integration](#mcp-integration) below.
 
 ### 3. Run from the menu bar
 
 Click the **DM** icon in your menu bar, add peers (or let Bonjour find them), open your `distribute-metal.yaml`, and hit **Run**. The coordinator handles rank assignment, environment provisioning, and barriered launch.
+
+## Submission lifecycle
+
+When you click **Run**, the coordinator and agents execute this sequence:
+
+```mermaid
+sequenceDiagram
+    participant U as User (menu bar)
+    participant C as Coordinator (Swift)
+    participant A1 as Agent rank 0
+    participant A2 as Agent rank 1
+
+    U->>C: Open distribute-metal.yaml
+    C->>C: Parse YAML, create Job (phase: draft)
+    U->>C: Click Run
+
+    rect rgb(230, 240, 255)
+    note right of C: Phase: syncing
+    par Prepare all peers
+        C->>A1: POST /jobs/prepare {job_id, spec}
+        C->>A2: POST /jobs/prepare {job_id, spec}
+    end
+    A1-->>C: ok
+    A2-->>C: ok
+    end
+
+    rect rgb(230, 255, 230)
+    note right of C: Phase: provisioning
+    A1->>A1: uv venv + uv sync
+    A2->>A2: uv venv + uv sync
+    loop Poll every 2s (timeout 300s)
+        C->>A1: GET /status
+        C->>A2: GET /status
+    end
+    A1-->>C: state: ready
+    A2-->>C: state: ready
+    end
+
+    rect rgb(255, 245, 230)
+    note right of C: Phase: launching
+    par Barriered launch
+        C->>A1: POST /jobs/launch {rank 0, master_addr, world_size}
+        C->>A2: POST /jobs/launch {rank 1, master_addr, world_size}
+    end
+    A1->>A1: torchrun --node_rank=0 ...
+    A2->>A2: torchrun --node_rank=1 ...
+    end
+
+    note right of C: Phase: running
+    U->>C: Click Stop (optional)
+    C->>A1: POST /jobs/stop
+    C->>A2: POST /jobs/stop
+    U->>C: Click Clean
+    C->>A1: POST /jobs/clean
+    C->>A2: POST /jobs/clean
+```
+
+### Step by step
+
+1. **Open YAML.** The menu bar shows an "Open distribute-metal.yaml..." button. Selecting a file parses the spec and creates a `Job` in draft state. The peers list is populated from Bonjour discovery (automatic) or manual entry.
+
+2. **Prepare.** The coordinator sends `POST /jobs/prepare` to every agent in parallel. Each agent creates a workspace at `~/Library/Application Support/DistributeMetal/jobs/<job_id>/` with `src/`, `data/`, and `logs/` subdirectories, then starts provisioning a virtual environment using `uv venv` + `uv sync` from the `pyproject.toml` in `src/`.
+
+3. **Wait for ready.** The coordinator polls `GET /status` on each agent every 2 seconds until all report `state: ready` (or one reports `failed`). Timeout is 300 seconds.
+
+4. **Launch.** Once all agents are ready, the coordinator sends `POST /jobs/launch` to every agent simultaneously. Each launch request includes the `master_addr` (rank-0 peer's IP), `master_port` (default 29500), `world_size`, `node_rank` (sequential index in the peer list), and `nproc_per_node`. The agent starts `torchrun` as a subprocess with these parameters. Stdout and stderr go to `logs/torchrun.log`.
+
+5. **Running.** Each machine's `torchrun` process performs the MCCL rendezvous using `master_addr:master_port` and begins training. The coordinator shows the job as "running."
+
+6. **Completion.** When `torchrun` exits on an agent, the next `GET /status` call detects the exit code and transitions the agent to `ready` (exit 0) or `failed`. The user can then **Stop** any remaining agents and **Clean** to remove workspaces.
+
+### Agent HTTP API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/status` | Hardware info, agent state, job ID. Detects torchrun exit. |
+| `POST` | `/jobs/prepare` | Create workspace, start `uv` provisioning (async). |
+| `POST` | `/jobs/launch` | Start `torchrun` with rank and rendezvous parameters. |
+| `POST` | `/jobs/stop` | SIGTERM the torchrun process (SIGKILL after 15s). |
+| `GET` | `/jobs/{job_id}/logs` | Tail the torchrun log (default 200 lines). |
+| `POST` | `/jobs/clean` | Stop job, delete workspace (src, venv, data). |
+
+### Workspace layout on each agent
+
+```
+~/Library/Application Support/DistributeMetal/jobs/<job_id>/
+├── src/              # Project source (pyproject.toml, training scripts)
+├── data/             # Training data
+├── logs/
+│   └── torchrun.log  # Combined stdout/stderr from torchrun
+└── .venv/            # uv-managed virtual environment
+```
+
+### Current limitations (v0.1)
+
+- **No automatic code sync.** The project source must be present at each agent's workspace before running. Use `rsync`, a shared volume, or copy manually. Bundle upload (`PUT /jobs/{job_id}/bundle`) is defined but returns 501 pending implementation.
+- **Entrypoint is fixed at `train.py`.** The agent does not yet read `project.entrypoint` from the YAML spec. This will be wired in a future release.
+- **No completion polling from the UI.** The coordinator does not automatically detect when training finishes. Check agent status manually or watch the torchrun logs.
 
 ## Project structure
 
