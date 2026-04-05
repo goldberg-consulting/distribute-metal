@@ -6,7 +6,7 @@ import Combine
 final class JobOrchestrator: ObservableObject {
     static let shared = JobOrchestrator()
 
-    private let logger = Logger(subsystem: "com.measured.distribute-metal", category: "Orchestrator")
+    private let logger = Logger(subsystem: "one.measured.distribute-metal", category: "Orchestrator")
     private let client = AgentClient()
 
     @Published var currentJob: Job?

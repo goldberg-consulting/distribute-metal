@@ -1,12 +1,12 @@
 ---
-description: Schema and conventions for distribute-metal.yaml job specs used by the DistributeMetal Metal DDP cluster. Apply when generating, editing, or discussing distribute-metal.yaml files.
+description: Schema and conventions for distribute-metal.yaml job specs used by the measured.one.distribute-metal cluster. Apply when generating, editing, or discussing distribute-metal.yaml files.
 globs: "**/distribute-metal.yaml"
 alwaysApply: false
 ---
 
 # distribute-metal.yaml spec
 
-DistributeMetal uses a `distribute-metal.yaml` at the project root to define what gets synced to worker Macs and how torchrun launches distributed training on Apple Silicon via the `mccl` backend.
+measured.one.distribute-metal uses a `distribute-metal.yaml` at the project root to define what gets synced to worker Macs and how torchrun launches distributed training on Apple Silicon via the `mccl` backend.
 
 ## Schema (v1)
 

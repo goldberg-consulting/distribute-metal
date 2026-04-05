@@ -1,6 +1,6 @@
-# DistributeMetal
+# measured.one.distribute-metal
 
-A macOS menu bar app that turns a handful of Apple Silicon Macs into a distributed PyTorch training cluster using Metal and the [MCCL](https://github.com/mps-ddp/mccl) backend for `torch.distributed`.
+A macOS menu bar app by [measured.one](https://measured.one) that turns a handful of Apple Silicon Macs into a distributed PyTorch training cluster using Metal and the [MCCL](https://github.com/mps-ddp/mccl) backend for `torch.distributed`.
 
 **Ship a YAML file. Click run. Train on every Mac in the room.**
 
@@ -46,13 +46,13 @@ This installs the signed, notarized app directly to your Applications folder.
 
 ### From DMG
 
-Download the latest `DistributeMetal-x.x.x.dmg` from [Releases](https://github.com/goldberg-consulting/distribute-metal/releases), open it, and drag to Applications.
+Download the latest `DistributeMetal-x.x.x.dmg` from [Releases](https://github.com/goldberg-consulting/measured.one.distribute-metal/releases), open it, and drag to Applications.
 
 ### Build from source
 
 ```bash
-git clone https://github.com/goldberg-consulting/distribute-metal.git
-cd distribute-metal
+git clone https://github.com/goldberg-consulting/measured.one.distribute-metal.git
+cd measured.one.distribute-metal
 
 # Dev build (installs to /Applications and launches)
 bash scripts/build-app.sh
@@ -213,7 +213,7 @@ sequenceDiagram
 ## Project structure
 
 ```
-distribute-metal/
+measured.one.distribute-metal/
 ├── apps/DistributeMetal/     # Swift macOS menu bar app (coordinator)
 │   ├── Package.swift
 │   ├── App/                  # Entry point + AppDelegate
@@ -306,7 +306,7 @@ The release script performs the following steps in order:
 
 1. Writes the new version to `VERSION`.
 2. Runs `build-release.sh` to produce a signed, notarized DMG.
-3. Commits and pushes the version bump to `goldberg-consulting/distribute-metal`.
+3. Commits and pushes the version bump to `goldberg-consulting/measured.one.distribute-metal`.
 4. Creates a GitHub release with the DMG attached (or uploads to an existing release).
 5. Computes the SHA256 of the DMG.
 6. Clones `goldberg-consulting/homebrew-tap`, updates the cask's `version` and `sha256`, commits, and pushes.

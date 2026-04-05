@@ -1,7 +1,7 @@
 [project]
 name = "distribute-metal-agent"
 version = "0.1.0"
-description = "Worker agent for DistributeMetal — provisions environments and runs torchrun on Apple Silicon"
+description = "Worker agent for measured.one.distribute-metal — provisions environments and runs torchrun on Apple Silicon"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

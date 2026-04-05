@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>DistributeMetal</string>
     <key>CFBundleIdentifier</key>
-    <string>com.measured.distribute-metal</string>
+    <string>one.measured.distribute-metal</string>
     <key>CFBundleName</key>
     <string>DistributeMetal</string>
     <key>CFBundleShortVersionString</key>
@@ -23,7 +23,7 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>DistributeMetal discovers other Macs on your network to form a training cluster.</string>
+    <string>measured.one.distribute-metal discovers other Macs on your network to form a training cluster.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_distributemetal._tcp</string>

@@ -1,4 +1,4 @@
-"""DistributeMetal MCP server.
+"""measured.one.distribute-metal MCP server.
 
 Exposes tools for cluster inspection, YAML generation, and validation
 that Cursor's AI agent can call via the Model Context Protocol.
@@ -30,9 +30,9 @@ SCHEMA_PATH = Path(__file__).resolve().parents[4] / "schemas" / "distribute-meta
 mcp = FastMCP(
     "distribute-metal",
     instructions=(
-        "DistributeMetal cluster management. Use these tools to inspect the "
-        "Metal DDP training cluster, generate distribute-metal.yaml job specs, "
-        "and validate existing specs. Peers run DistributeMetal agents on port 8477."
+        "measured.one.distribute-metal cluster management. Use these tools to "
+        "inspect the Metal DDP training cluster, generate distribute-metal.yaml "
+        "job specs, and validate existing specs. Peers run agents on port 8477."
     ),
 )
 

@@ -6,7 +6,7 @@ import os.log
 final class DiscoveryService: ObservableObject {
     static let shared = DiscoveryService()
 
-    private let logger = Logger(subsystem: "com.measured.distribute-metal", category: "Discovery")
+    private let logger = Logger(subsystem: "one.measured.distribute-metal", category: "Discovery")
     private let serviceType = "_distributemetal._tcp"
     private let agentPort: NWEndpoint.Port = 8477
 
@@ -16,7 +16,7 @@ final class DiscoveryService: ObservableObject {
     private var localBrowser: NWBrowser?
     private var advertiser: NWListener?
     private var dnssdProcess: Process?
-    private let queue = DispatchQueue(label: "com.measured.distribute-metal.discovery", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "one.measured.distribute-metal.discovery", qos: .userInitiated)
 
     private init() {}
 

@@ -23,7 +23,7 @@ GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION_FILE="$PROJECT_ROOT/VERSION"
-REPO="goldberg-consulting/distribute-metal"
+REPO="goldberg-consulting/measured.one.distribute-metal"
 TAP_REPO="goldberg-consulting/homebrew-tap"
 CASK_PATH="Casks/distribute-metal.rb"
 

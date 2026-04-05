@@ -9,7 +9,7 @@ set -e
 
 APP_NAME="DistributeMetal"
 VERSION="$(cat "$( cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd )/VERSION" | tr -d '[:space:]')"
-BUNDLE_ID="com.measured.distribute-metal"
+BUNDLE_ID="one.measured.distribute-metal"
 GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
 
 RUN_APP=true; [[ "$1" == "--no-run" ]] && RUN_APP=false
@@ -81,7 +81,7 @@ cat > "$APP_NAME.app/Contents/Info.plist" << EOF
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSLocalNetworkUsageDescription</key><string>DistributeMetal discovers other Macs on your network to form a training cluster.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>measured.one.distribute-metal discovers other Macs on your network to form a training cluster.</string>
     <key>NSBonjourServices</key><array><string>_distributemetal._tcp</string></array>
 </dict></plist>
 EOF

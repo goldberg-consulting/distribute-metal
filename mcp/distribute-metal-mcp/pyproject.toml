@@ -1,7 +1,7 @@
 [project]
 name = "distribute-metal-mcp"
 version = "0.1.0"
-description = "MCP server for DistributeMetal — cluster inspection, YAML generation, and validation"
+description = "MCP server for measured.one.distribute-metal — cluster inspection, YAML generation, and validation"
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]",

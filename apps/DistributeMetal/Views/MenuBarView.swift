@@ -31,9 +31,9 @@ struct MenuBarView: View {
                 .font(.title2)
                 .foregroundStyle(.blue)
             VStack(alignment: .leading, spacing: 2) {
-                Text("DistributeMetal")
+                Text("measured.one")
                     .font(.headline)
-                Text("Metal DDP Cluster")
+                Text("distribute-metal")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

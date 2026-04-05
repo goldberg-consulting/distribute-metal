@@ -1,4 +1,4 @@
-"""DistributeMetal agent HTTP server.
+"""measured.one.distribute-metal agent HTTP server.
 
 Run with:
     uv run distribute-metal-agent
@@ -49,12 +49,12 @@ _provision_threads: dict[str, threading.Thread] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("DistributeMetal agent v%s starting on port 8477", __version__)
+    logger.info("measured.one.distribute-metal agent v%s starting on port 8477", __version__)
     yield
     logger.info("Agent shutting down")
 
 
-app = FastAPI(title="DistributeMetal Agent", version=__version__, lifespan=lifespan)
+app = FastAPI(title="measured.one.distribute-metal Agent", version=__version__, lifespan=lifespan)
 
 
 @app.get("/status")

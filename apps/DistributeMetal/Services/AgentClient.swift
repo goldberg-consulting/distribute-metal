@@ -2,7 +2,7 @@ import Foundation
 import os.log
 
 actor AgentClient {
-    private let logger = Logger(subsystem: "com.measured.distribute-metal", category: "AgentClient")
+    private let logger = Logger(subsystem: "one.measured.distribute-metal", category: "AgentClient")
     private let session: URLSession
     private let timeout: TimeInterval = 30
 
