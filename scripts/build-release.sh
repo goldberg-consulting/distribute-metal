@@ -8,7 +8,7 @@ set -e
 
 APP_NAME="DistributeMetal"
 BUNDLE_ID="com.measured.distribute-metal"
-VERSION="0.1.0"
+VERSION="$(cat "$( cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd )/VERSION" | tr -d '[:space:]')"
 DMG_NAME="${APP_NAME}-${VERSION}"
 
 GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'

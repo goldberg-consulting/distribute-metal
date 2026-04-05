@@ -128,8 +128,10 @@ distribute-metal/
 ├── schemas/                  # YAML spec reference
 ├── examples/mccl_ddp_train/  # Example training project with MCCL DDP
 ├── scripts/
-│   ├── build-app.sh          # Dev build
-│   └── build-release.sh      # Signed + notarized release build
+│   ├── build-app.sh          # Dev build (debug, installs to /Applications)
+│   ├── build-release.sh      # Signed + notarized DMG
+│   └── release.sh            # Full release: build, GitHub release, cask bump
+├── VERSION                   # Single source of truth for the version string
 ├── DistributeMetal.entitlements
 ├── .env.example
 └── LICENSE                   # MIT
@@ -180,6 +182,37 @@ dist.destroy_process_group()
 ```
 
 See `examples/mccl_ddp_train/` for a complete working example.
+
+## Releasing
+
+Version is tracked in a single `VERSION` file at the project root. All build scripts read from it.
+
+To cut a release:
+
+```bash
+# Release the current VERSION
+bash scripts/release.sh
+
+# Bump patch (0.1.0 -> 0.1.1) and release
+bash scripts/release.sh patch
+
+# Bump minor (0.1.0 -> 0.2.0) and release
+bash scripts/release.sh minor
+
+# Bump to an explicit version and release
+bash scripts/release.sh 0.3.0
+```
+
+The release script performs the following steps in order:
+
+1. Writes the new version to `VERSION`.
+2. Runs `build-release.sh` to produce a signed, notarized DMG.
+3. Commits and pushes the version bump to `goldberg-consulting/distribute-metal`.
+4. Creates a GitHub release with the DMG attached (or uploads to an existing release).
+5. Computes the SHA256 of the DMG.
+6. Clones `goldberg-consulting/homebrew-tap`, updates the cask's `version` and `sha256`, commits, and pushes.
+
+After the script completes, `brew upgrade distribute-metal` picks up the new version automatically.
 
 ## License
 
