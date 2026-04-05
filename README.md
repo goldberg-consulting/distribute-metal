@@ -35,9 +35,17 @@ A macOS menu bar app that turns a handful of Apple Silicon Macs into a distribut
 
 ## Install
 
-### From DMG (recommended)
+### Homebrew (recommended)
 
-Download the latest `DistributeMetal-x.x.x.dmg` from [Releases](https://github.com/goldberg-consulting/distribute-metal/releases), open it, and drag to Applications. The DMG is signed and notarized by Apple.
+```bash
+brew install goldberg-consulting/tap/distribute-metal
+```
+
+This installs the signed, notarized app directly to your Applications folder.
+
+### From DMG
+
+Download the latest `DistributeMetal-x.x.x.dmg` from [Releases](https://github.com/goldberg-consulting/distribute-metal/releases), open it, and drag to Applications.
 
 ### Build from source
 
