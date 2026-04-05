@@ -31,3 +31,15 @@ agent/.venv/
 .cursor/rules/security.mdc
 .cursor/rules/sql-standards.mdc
 .cursor/rules/writing-style.mdc
+.inkwell/outputs/
+.inkwell/compiled/
+.inkwell/mermaid/
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+venv/
+.inkwell/
+requirements.txt

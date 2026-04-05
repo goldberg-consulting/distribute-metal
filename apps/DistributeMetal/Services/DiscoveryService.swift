@@ -3,6 +3,7 @@ import Network
 import Combine
 import os.log
 
+@MainActor
 final class DiscoveryService: ObservableObject {
     static let shared = DiscoveryService()
 
@@ -11,12 +12,14 @@ final class DiscoveryService: ObservableObject {
     private let agentPort: NWEndpoint.Port = 8477
 
     @Published var discoveredPeers: [String: Peer] = [:]
+    @Published var isScanning = false
 
     private var browser: NWBrowser?
     private var localBrowser: NWBrowser?
-    private var advertiser: NWListener?
     private var dnssdProcess: Process?
     private let queue = DispatchQueue(label: "one.measured.distribute-metal.discovery", qos: .userInitiated)
+    private let client = AgentClient()
+    private var probeTask: Task<Void, Never>?
 
     private init() {}
 
@@ -58,7 +61,8 @@ final class DiscoveryService: ObservableObject {
     // MARK: - Browse
 
     func startBrowsing() {
-        guard browser == nil else { return }
+        stopBrowsing()
+        isScanning = true
 
         let params = NWParameters()
         params.includePeerToPeer = true
@@ -79,7 +83,9 @@ final class DiscoveryService: ObservableObject {
             }
 
             b.browseResultsChangedHandler = { [weak self] results, _ in
-                self?.handleBrowseResults(results)
+                Task { @MainActor in
+                    self?.handleBrowseResults(results)
+                }
             }
 
             b.start(queue: queue)
@@ -90,6 +96,11 @@ final class DiscoveryService: ObservableObject {
                 browser = b
             }
         }
+
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            isScanning = false
+        }
     }
 
     func stopBrowsing() {
@@ -99,7 +110,91 @@ final class DiscoveryService: ObservableObject {
         localBrowser = nil
     }
 
+    // MARK: - Full scan (re-discover + probe all)
+
+    func scan() {
+        stopBrowsing()
+        startBrowsing()
+        startAdvertising()
+        probeAllPeers()
+    }
+
+    // MARK: - Probe agents via HTTP
+
+    func probeAllPeers() {
+        probeTask?.cancel()
+        probeTask = Task {
+            await withTaskGroup(of: (String, Peer?).self) { group in
+                for (ip, peer) in discoveredPeers {
+                    group.addTask { [client] in
+                        do {
+                            let status = try await client.fetchStatus(from: peer)
+                            var updated = peer
+                            updated.status = Self.mapAgentState(status.state)
+                            updated.arch = status.arch
+                            updated.chip = status.chip
+                            updated.memoryGB = status.memoryGB
+                            updated.macOSVersion = status.macOSVersion
+                            updated.agentVersion = status.agentVersion
+                            updated.mcclVersion = status.mcclVersion
+                            updated.pythonVersion = status.pythonVersion
+                            updated.uvAvailable = status.uvAvailable
+                            updated.freeDiskGB = status.freeDiskGB
+                            updated.lastSeen = Date()
+                            return (ip, updated)
+                        } catch {
+                            var updated = peer
+                            updated.status = .offline
+                            return (ip, updated)
+                        }
+                    }
+                }
+                for await (ip, peer) in group {
+                    if let peer {
+                        discoveredPeers[ip] = peer
+                    }
+                }
+            }
+        }
+    }
+
+    func probePeer(_ peer: Peer) async -> Peer {
+        do {
+            let status = try await client.fetchStatus(from: peer)
+            var updated = peer
+            updated.status = Self.mapAgentState(status.state)
+            updated.arch = status.arch
+            updated.chip = status.chip
+            updated.memoryGB = status.memoryGB
+            updated.macOSVersion = status.macOSVersion
+            updated.agentVersion = status.agentVersion
+            updated.mcclVersion = status.mcclVersion
+            updated.pythonVersion = status.pythonVersion
+            updated.uvAvailable = status.uvAvailable
+            updated.freeDiskGB = status.freeDiskGB
+            updated.lastSeen = Date()
+            return updated
+        } catch {
+            var updated = peer
+            updated.status = .offline
+            return updated
+        }
+    }
+
+    private nonisolated static func mapAgentState(_ state: AgentState) -> PeerStatus {
+        switch state {
+        case .idle, .ready, .cleaned:
+            return .ready
+        case .syncing, .provisioning, .launching, .running:
+            return .busy
+        case .failed:
+            return .offline
+        }
+    }
+
     private func handleBrowseResults(_ results: Set<NWBrowser.Result>) {
+        let localIP = NetworkUtils.localIPAddress ?? ""
+
         for result in results {
             guard case .service(let name, let type, _, _) = result.endpoint else { continue }
             guard type.contains(serviceType) else { continue }
@@ -114,6 +209,10 @@ final class DiscoveryService: ObservableObject {
             let ip = txtFields["ip"] ?? "unknown"
             let ver = txtFields["ver"]
 
+            if ip == localIP || ip == "unknown" { continue }
+
+            if discoveredPeers[ip] != nil { continue }
+
             let peer = Peer(
                 id: UUID(),
                 name: name,
@@ -125,11 +224,13 @@ final class DiscoveryService: ObservableObject {
                 lastSeen: Date()
             )
 
-            DispatchQueue.main.async {
-                self.discoveredPeers[ip] = peer
-            }
-
+            discoveredPeers[ip] = peer
             logger.info("Found peer: \(name) at \(ip)")
+
+            Task {
+                let probed = await probePeer(peer)
+                discoveredPeers[ip] = probed
+            }
         }
     }
 
@@ -137,15 +238,16 @@ final class DiscoveryService: ObservableObject {
 
     func addManualPeer(name: String, ip: String, port: Int = 8477) {
         let peer = Peer.manual(name: name, ip: ip, port: port)
-        DispatchQueue.main.async {
-            self.discoveredPeers[ip] = peer
+        discoveredPeers[ip] = peer
+
+        Task {
+            let probed = await probePeer(peer)
+            discoveredPeers[ip] = probed
         }
     }
 
     func removePeer(ip: String) {
-        DispatchQueue.main.async {
-            self.discoveredPeers.removeValue(forKey: ip)
-        }
+        discoveredPeers.removeValue(forKey: ip)
     }
 }
 

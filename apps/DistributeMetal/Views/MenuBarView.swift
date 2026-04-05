@@ -5,7 +5,6 @@ struct MenuBarView: View {
     @EnvironmentObject var orchestrator: JobOrchestrator
 
     @State private var showAddPeer = false
-    @State private var showJobPicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,7 +37,8 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("v0.1.0")
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+            Text("v\(version)")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -52,7 +52,22 @@ struct MenuBarView: View {
             HStack {
                 Text("Peers")
                     .font(.subheadline.weight(.semibold))
+
+                let readyCount = discovery.discoveredPeers.values.filter { $0.status == .ready }.count
+                let total = discovery.discoveredPeers.count
+                if total > 0 {
+                    Text("\(readyCount)/\(total) ready")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
                 Spacer()
+
+                if discovery.isScanning {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+
                 Button {
                     showAddPeer = true
                 } label: {
@@ -68,10 +83,10 @@ struct MenuBarView: View {
                         Image(systemName: "antenna.radiowaves.left.and.right")
                             .font(.title3)
                             .foregroundStyle(.secondary)
-                        Text("No peers found")
+                        Text(discovery.isScanning ? "Scanning..." : "No peers found")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("Add manually or wait for discovery")
+                        Text("Press Scan or add manually")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -79,8 +94,10 @@ struct MenuBarView: View {
                 }
                 .padding(.vertical, 8)
             } else {
-                ForEach(Array(discovery.discoveredPeers.values), id: \.id) { peer in
-                    PeerRow(peer: peer)
+                ForEach(Array(discovery.discoveredPeers.values).sorted(by: { $0.name < $1.name }), id: \.id) { peer in
+                    PeerRow(peer: peer) {
+                        discovery.removePeer(ip: peer.ipAddress)
+                    }
                 }
             }
         }
@@ -100,16 +117,29 @@ struct MenuBarView: View {
             if let job = orchestrator.currentJob {
                 JobStatusView(job: job)
             } else {
-                Button {
-                    openJobYAML()
-                } label: {
-                    HStack {
-                        Image(systemName: "doc.badge.plus")
-                        Text("Open distribute-metal.yaml...")
+                VStack(spacing: 6) {
+                    Button {
+                        openJobYAML()
+                    } label: {
+                        HStack {
+                            Image(systemName: "doc.badge.plus")
+                            Text("Open distribute-metal.yaml...")
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        initJobFromFolder()
+                    } label: {
+                        HStack {
+                            Image(systemName: "folder.badge.gearshape")
+                            Text("New Job from Folder...")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
         }
         .padding()
@@ -120,10 +150,28 @@ struct MenuBarView: View {
     private var footer: some View {
         HStack {
             Button {
-                discovery.startBrowsing()
-                discovery.startAdvertising()
+                discovery.scan()
             } label: {
-                Label("Scan", systemImage: "arrow.triangle.2.circlepath")
+                HStack(spacing: 4) {
+                    if discovery.isScanning {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    Text("Scan")
+                }
+                .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .disabled(discovery.isScanning)
+
+            Spacer()
+
+            Button {
+                discovery.probeAllPeers()
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
                     .font(.caption)
             }
             .buttonStyle(.plain)
@@ -157,6 +205,28 @@ struct MenuBarView: View {
                 _ = try orchestrator.createJob(from: url, peers: peers)
             } catch {
                 print("Failed to load job spec: \(error)")
+            }
+        }
+    }
+
+    private func initJobFromFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Select a training project folder"
+        panel.prompt = "Generate YAML"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            Task {
+                do {
+                    let yaml = try YAMLGenerator.generate(from: url)
+                    let yamlURL = url.appendingPathComponent("distribute-metal.yaml")
+                    try yaml.write(to: yamlURL, atomically: true, encoding: .utf8)
+                    _ = try orchestrator.createJob(from: yamlURL, peers: Array(discovery.discoveredPeers.values))
+                } catch {
+                    print("Failed to generate job spec: \(error)")
+                }
             }
         }
     }

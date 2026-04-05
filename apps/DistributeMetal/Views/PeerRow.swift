@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PeerRow: View {
     let peer: Peer
+    var onRemove: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -13,27 +14,38 @@ struct PeerRow: View {
                 Text(peer.name)
                     .font(.caption.weight(.medium))
                     .lineLimit(1)
-                Text(peer.displayAddress)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    Text(peer.displayAddress)
+                    if let chip = peer.chip {
+                        Text("·")
+                        Text(chip)
+                    }
+                    if let mem = peer.memoryGB {
+                        Text("·")
+                        Text("\(mem)GB")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
 
             Spacer()
-
-            if let chip = peer.chip {
-                Text(chip)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
 
             Text(peer.status.rawValue)
                 .font(.caption2)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(statusColor.opacity(0.15))
+                .foregroundStyle(statusColor)
                 .clipShape(Capsule())
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            if let onRemove {
+                Button("Remove", role: .destructive, action: onRemove)
+            }
+        }
     }
 
     private var statusColor: Color {
