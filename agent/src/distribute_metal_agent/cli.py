@@ -102,13 +102,15 @@ validation:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    import httpx
+    import json
+    import urllib.request
+    import urllib.error
 
     url = f"http://{args.host}:{args.port}/status"
     try:
-        resp = httpx.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
         print(f"Agent:   {data.get('agent_version', '?')}")
         print(f"State:   {data.get('state', '?')}")
         print(f"Chip:    {data.get('chip', '?')}")
