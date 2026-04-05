@@ -8,6 +8,22 @@ alwaysApply: false
 
 measured.one.distribute-metal uses a `distribute-metal.yaml` at the project root to define what gets synced to worker Macs and how torchrun launches distributed training on Apple Silicon via the `mccl` backend.
 
+## Workflow: generating a YAML for a project
+
+When a user asks to set up distribute-metal for a project, follow this sequence:
+
+1. **Inspect the project.** Call `generate_yaml` with the project path. This reads pyproject.toml, detects the training entrypoint, finds data directories, and produces a complete YAML.
+
+2. **Check the cluster.** Call `cluster_status` to see which peers are available, their hardware (chip, memory), installed tools (uv, mccl, Python), and current state (idle, busy, offline).
+
+3. **Cross-reference.** Call `preflight_job` with the generated YAML path. This validates the spec AND checks every peer against the spec's requirements. It returns a go/no-go verdict with specific blockers.
+
+4. **Report gaps to the user.** The MCP can see what the project needs and what the cluster has, but it cannot install software or transfer data. Tell the user exactly what is missing and on which machine.
+
+5. **Iterate.** If the user edits the YAML or fixes issues on a peer, call `validate_yaml` or `preflight_job` again to re-check.
+
+The MCP is read-only with respect to the cluster: it queries agent status but never executes commands on remote machines. The coordinator app handles actual job execution.
+
 ## Schema (v1)
 
 ```yaml
@@ -76,9 +92,16 @@ validation:
 
 The `distribute-metal` MCP server provides live cluster operations:
 
-- **`cluster_status`** — query all peers for hardware, state, and toolchain versions
-- **`peer_preflight`** — check if a specific peer is ready (arch, uv, mccl, disk)
-- **`generate_yaml`** — inspect a project directory and produce a complete spec
-- **`validate_yaml`** — parse an existing spec and report errors
+| Tool | What it sees | What it does |
+|------|-------------|--------------|
+| `generate_yaml` | Project directory: pyproject.toml, Python files, data dirs, configs | Produces a complete distribute-metal.yaml |
+| `validate_yaml` | YAML file contents, referenced file paths | Reports structural errors and missing files |
+| `cluster_status` | Every peer's hardware, OS, Python, uv, mccl, disk, agent state | Returns a cluster-wide status summary |
+| `peer_preflight` | One peer's full agent status | Checks readiness against minimum requirements |
+| `preflight_job` | YAML spec + every peer's status | Cross-references project needs vs cluster capabilities, returns go/no-go |
 
-Use these tools when the user asks about cluster readiness, wants to generate a YAML for a new project, or wants to validate an existing one.
+Resources:
+- `schema://distribute-metal/v1` — the full YAML schema reference
+- `cluster://peers` — the configured peer list from `~/.config/distribute-metal/peers.yaml`
+
+The MCP can see project structure and cluster state. It cannot transfer files, install packages, or execute training. It reports what is needed so the user or coordinator can act.

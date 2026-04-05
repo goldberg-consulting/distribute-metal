@@ -147,6 +147,89 @@ async def validate_yaml(yaml_path: str) -> str:
     return json.dumps({"valid": False, "issues": issues}, indent=2)
 
 
+@mcp.tool()
+async def preflight_job(yaml_path: str) -> str:
+    """Cross-reference a distribute-metal.yaml against the live cluster.
+
+    This is the primary tool for checking whether a job can run. It:
+    1. Validates the YAML spec for structural errors
+    2. Queries every configured peer for hardware and software state
+    3. Runs preflight checks per peer against the spec requirements
+    4. Reports what the project needs vs what each peer has
+
+    Returns a structured report: spec issues, per-peer readiness,
+    missing tools, insufficient resources, and a go/no-go verdict.
+
+    Args:
+        yaml_path: Absolute path to the distribute-metal.yaml file.
+    """
+    import yaml as _yaml
+
+    report: dict[str, Any] = {"yaml_path": yaml_path}
+
+    spec_issues = _validate_yaml(yaml_path)
+    report["spec_issues"] = spec_issues
+
+    spec: dict[str, Any] = {}
+    path = Path(yaml_path).resolve()
+    if path.exists():
+        try:
+            with open(path) as f:
+                spec = _yaml.safe_load(f) or {}
+        except Exception:
+            pass
+
+    peers = load_peers()
+    if not peers:
+        report["cluster"] = {
+            "error": "No peers configured in ~/.config/distribute-metal/peers.yaml"
+        }
+        report["ready"] = False
+        return json.dumps(report, indent=2)
+
+    statuses = await fetch_all_peer_statuses(peers)
+
+    peer_reports = []
+    all_ready = True
+    for status in statuses:
+        issues = preflight_check(status, spec)
+        ready = len(issues) == 0 and status.reachable
+        if not ready:
+            all_ready = False
+        peer_reports.append({
+            "peer": status.summary(),
+            "ready": ready,
+            "issues": issues,
+        })
+
+    report["cluster"] = {
+        "total_peers": len(statuses),
+        "reachable": sum(1 for s in statuses if s.reachable),
+        "ready": sum(1 for p in peer_reports if p["ready"]),
+        "peers": peer_reports,
+    }
+
+    training = spec.get("training", {})
+    torchrun = training.get("torchrun", {})
+    nproc = torchrun.get("nproc_per_node", 1)
+    ready_count = report["cluster"]["ready"]
+    report["world_size"] = ready_count * nproc
+    report["ready"] = all_ready and len(spec_issues) == 0 and ready_count > 0
+
+    if not report["ready"]:
+        blockers = []
+        if spec_issues:
+            blockers.append(f"YAML has {len(spec_issues)} issue(s)")
+        not_ready = [p for p in peer_reports if not p["ready"]]
+        if not_ready:
+            blockers.append(f"{len(not_ready)} peer(s) not ready")
+        if ready_count == 0:
+            blockers.append("No peers available")
+        report["blockers"] = blockers
+
+    return json.dumps(report, indent=2)
+
+
 def main():
     mcp.run()
 
