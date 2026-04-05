@@ -1,0 +1,33 @@
+.build/
+build-xcode/
+dist/
+*.app
+*.dmg
+.env
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+uv.lock
+
+# MCP / agent local venvs
+mcp/distribute-metal-mcp/.venv/
+agent/.venv/
+
+# Cursor internals (plans, agent transcripts, terminals are local)
+.cursor/plans/
+.cursor/agents/
+.cursor/skills/
+
+# Personal cursor rules (not project-specific)
+.cursor/rules/agent-routing.mdc
+.cursor/rules/embedding-pipeline-validation.mdc
+.cursor/rules/general.mdc
+.cursor/rules/git-workflow.mdc
+.cursor/rules/glossary.mdc
+.cursor/rules/pathwaymapping-context.mdc
+.cursor/rules/reference-data.mdc
+.cursor/rules/security.mdc
+.cursor/rules/sql-standards.mdc
+.cursor/rules/writing-style.mdc

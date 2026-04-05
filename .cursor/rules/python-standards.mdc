@@ -1,0 +1,102 @@
+---
+description: Python coding standards for type safety, OO design, vectorization, Polars-first data, and testing
+globs: **/*.py
+alwaysApply: false
+---
+
+# Python Standards
+
+Target Python 3.12+. Format with `black` (line length 100). Lint with `ruff check`. Configure via `pyproject.toml`.
+
+## Type Hints
+- All function signatures must have type hints on parameters and return types.
+- Modern syntax: `str | None`, `list[str]`, `dict[str, int]`. Not `Optional`, `List`, `Dict`.
+- Complex types get a `TypeAlias` at module level with a descriptive name.
+- `Protocol` over ABC for structural typing when the interface is small. ABC is acceptable for pipeline step hierarchies and similar deep class trees.
+
+## Design Style
+- Object-oriented by default. Classes model domain entities (processors, analyzers, engines, steps) that carry state and behavior together.
+- `dataclass` for data containers. Use `frozen=True` when the object should be immutable after creation (stage definitions, configs, results). Use mutable dataclasses when state accumulates during processing (staging rules, pipeline context).
+- Pydantic `BaseModel` for configuration that crosses trust boundaries (API inputs, user-provided config). `dataclass` for internal structured data.
+- Never pass raw dicts between functions as a substitute for a type. If a dict is crossing a function boundary, it should be a dataclass or Pydantic model.
+- Enums for finite state sets (stage persistence, step status, product types). Not string constants.
+- `@classmethod` factory methods for alternative constructors (`create_new_db`, `connect_for_analysis`, `from_env`).
+- `__post_init__` for derived state, validation, and initialization logic that depends on multiple fields.
+- Push side effects to boundaries (init, I/O methods, CLI entry points). Keep transformation logic pure within methods when possible.
+- Functions that don't need instance state are fine as module-level functions. Do not force them into classes. But do not scatter utility functions across modules without organizing structure.
+
+## Vectorization
+- **No loops over core data. Ever.** Use Polars expressions, DuckDB SQL, or NumPy/Pandas vectorized operations. A `for` loop over rows is a bug.
+- Polars: chain `.filter()`, `.with_columns()`, `.group_by()`, `.join()`. Build complex logic with `pl.when().then().otherwise()` and `pl.Expr` composition. Use `.list.eval()` for nested list operations.
+- DuckDB: use `STRING_AGG`, `COUNT(DISTINCT ...)`, window functions, and CTEs for aggregation. `read_parquet()` with `union_by_name=true` for schema-drifted files.
+- Batch processing is acceptable for memory management (processing N members at a time), but within each batch, all operations must be vectorized.
+- Regex pattern matching over string columns (`str.contains()`) is the correct pattern for code-set matching (ICD, CPT). Build patterns once, apply vectorized.
+- If you find yourself writing `iterrows()`, `apply(axis=1)`, or `for row in df`:  stop. Rethink the approach as a columnar operation.
+
+## Data
+- **Polars over Pandas.** Lazy evaluation (`.lazy()` then `.collect()`). Name frames descriptively, not `df`.
+- Chain operations fluently, one per line. Always `.alias()` computed columns.
+- DuckDB for complex analytical SQL, batch joins, and aggregation over large datasets. Parameterized queries only (`?` placeholders).
+- `TRY_CAST` for defensive type conversion in DuckDB. Never assume column types match across file partitions.
+- Schema validation at boundaries: check columns, types, and nulls on ingest. Fail fast with a clear error, not halfway through a pipeline.
+- Checkpoint periodically during long-running batch operations. Use `gc.collect()` between batches for memory management.
+
+## Logging
+- `structlog` with structured key-value data in library code. Never `print()` in library code.
+- `print()` is acceptable in notebooks, scripts, and CLI tools for interactive progress reporting.
+- Static message templates: `logger.info("claims_processed", count=len(claims))`. Never bake values into the template with f-strings.
+
+## Error Handling
+- Specific exceptions inheriting from a package-level base: `class AppError(Exception): ...`
+- Error messages include context a developer needs to debug: `f"Claim {claim_id}: service_date {date} precedes enrollment {start}"`
+- Do not catch exceptions you cannot meaningfully handle. Let them propagate.
+- Never bare `except:`. Almost never `except Exception:`.
+- Bare `except:` with `pass` is acceptable only in two cases: (1) DuckDB version-specific settings that may not exist in all versions, (2) cleanup in `__del__` where failure is irrelevant.
+
+## Modules
+- `pathlib.Path` over `os.path`. Context managers for resources. Generators for lazy pipelines.
+- `from __future__ import annotations` when needed. `__all__` in every `__init__.py`.
+- Google-style docstrings on public APIs describing behavior and contracts. No echo docstrings. No section-label comments.
+- The team's voice in docstrings is direct, dry, and first-person. Preserve that voice. Do not sanitize to generic corporate tone.
+
+## Testing
+
+### Test Organization
+- `pytest` only. No `unittest.TestCase` subclasses.
+- Mark tests with `@pytest.mark.unit`, `@pytest.mark.integration`, or `@pytest.mark.slow`.
+- Unit tests have no external dependencies (no S3, no Snowflake, no Databricks). Integration tests skip gracefully when credentials are unavailable (`pytest.skip()`).
+- Test file names mirror source: `src/utils/claims_processor.py` is tested in `tests/test_claims_processor.py`.
+- `conftest.py` for shared fixtures. Scope fixtures appropriately: `session` for expensive setup (database connections, large test data generation), `function` for test isolation (temp directories, mutable state).
+
+### Test Design
+- Test names describe behavior, not implementation: `test_stage_progression_skips_remission_if_no_followup`, not `test_process_method`.
+- Each test asserts one behavioral contract. If a test has multiple unrelated assertions, split it.
+- Factory functions for test data. Each test specifies only what differs from defaults. Do not build test data with raw dicts or repeated boilerplate.
+- `pytest.mark.parametrize` for multiple input/output pairs. Do not copy-paste test functions that differ only in inputs.
+- Test the contract, not the implementation. If a refactor breaks the test, the test was too tightly coupled.
+
+### Assertions
+- `polars.testing.assert_frame_equal` for Polars frame assertions.
+- `pytest.approx` for float comparisons.
+- For DuckDB results, convert to Polars with `.pl()` before asserting. Do not assert on raw tuples from `.fetchone()` in tests that verify data shape.
+- Schema assertions: check column names, types, and null counts at boundaries.
+
+### Test Data
+- Generate synthetic test data inline with factory functions. Pin random seeds for reproducibility (`np.random.seed(42)`).
+- Use small, purpose-built frames (10-50 rows) that exercise the specific behavior under test. Do not load production-scale data in unit tests.
+- For clinical logic, include edge cases that matter: SAS-format dates alongside ISO dates, bilateral procedures, multi-line claims, members with zero-day enrollment gaps, null amounts, codes with and without dots.
+- Save generated test data to parquet when downstream fixtures need it. Use `tmp_path` or `temp_dir` fixtures for isolation.
+
+### Integration Tests
+- Integration tests that require external services (S3, Snowflake, Databricks) must skip with a clear message when credentials are missing.
+- Use `@pytest.fixture(scope="session")` for connections that are expensive to establish.
+- Verify connectivity with a minimal operation (e.g., `SELECT 1`, `list_buckets`) before running the actual test logic.
+- Do not hardcode bucket names, table names, or paths in integration tests. Use environment variables or fixture-provided config.
+
+### What to Test
+- **Transformations**: Given this input frame, does the output frame have the expected columns, types, row count, and values?
+- **Clinical logic**: Does the staging engine assign the correct stage given a specific combination of codes, lanes, and features? Test each stage rule independently.
+- **Edge cases**: Empty frames, single-row frames, frames with all nulls, frames with mixed types (VARCHAR MEM_NUM alongside BIGINT MEM_NUM).
+- **Schema validation**: Does the validator reject malformed input with a clear error?
+- **Deduplication**: Does the dedup logic preserve legitimate duplicates (bilateral procedures) while removing true duplicates?
+- **Date parsing**: Does the parser handle both `'01JAN2024'` and `2024-01-01` formats?

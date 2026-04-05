@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "distribute-metal": {
+      "command": "uv",
+      "args": ["--directory", "mcp/distribute-metal-mcp", "run", "distribute-metal-mcp"],
+      "env": {}
+    }
+  }
+}

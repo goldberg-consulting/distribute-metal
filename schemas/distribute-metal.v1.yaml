@@ -1,0 +1,75 @@
+# distribute-metal.yaml — schema reference (v1)
+#
+# This file documents every field the coordinator and agents understand.
+# Users place a `distribute-metal.yaml` at the root of their training project.
+
+version: 1  # schema version, always 1 for now
+
+# ── project ──────────────────────────────────────────────────────────────────
+project:
+  name: ""                    # human-readable project name (required)
+  root: "."                   # path to project root relative to this file
+  working_dir: "."            # cwd for the training script, relative to root
+  entrypoint: "train.py"      # script to run via torchrun (required)
+  include:                    # glob patterns of files to sync to workers
+    - "**/*.py"
+    - "pyproject.toml"
+    - "uv.lock"
+  exclude:                    # glob patterns to skip
+    - ".git/**"
+    - ".venv/**"
+    - "__pycache__/**"
+    - "checkpoints/**"
+
+# ── python ───────────────────────────────────────────────────────────────────
+python:
+  version: ">=3.11,<3.14"    # PEP 440 version specifier (required)
+  pyproject: "pyproject.toml" # path to pyproject.toml relative to root
+  lockfile: "uv.lock"        # lockfile path; uv.lock strongly recommended
+
+# ── training ─────────────────────────────────────────────────────────────────
+training:
+  backend: "mccl"             # torch.distributed backend (mccl for Metal DDP)
+  torchrun:
+    nproc_per_node: 1         # processes per Mac (1 per Apple Silicon GPU)
+    master_port: 29500        # default; coordinator may override
+    script_args: []           # extra CLI args passed to entrypoint
+  env: {}                     # extra environment variables for all ranks
+  checkpoint_dir: "checkpoints"
+  rank0_only:                 # actions limited to the master rank
+    save_checkpoints: true
+    write_logs: true
+
+# ── data ─────────────────────────────────────────────────────────────────────
+# Each entry describes a dataset or artifact to sync before training.
+data: []
+# - name: "trainset"
+#   source: "coordinator"     # coordinator | http | s3 | local
+#   url: ""                   # for http/s3 sources
+#   path: "datasets/train"    # destination inside the job workspace
+#   sha256: ""                # content hash for verification
+#   size_bytes: 0             # optional, for progress estimation
+#   unpack: "none"            # none | tar | tar.gz | tar.zst | zip
+
+# ── sync ─────────────────────────────────────────────────────────────────────
+sync:
+  mode: "bulk"                # bulk (parallel HTTP range fetch)
+  parallel_connections: 8     # concurrent download connections per worker
+  chunk_size_mb: 64           # per-range chunk size
+  preferred_interface: "auto" # auto | thunderbolt | ethernet | wifi
+
+# ── cleanup ──────────────────────────────────────────────────────────────────
+cleanup:
+  delete_venv_on_success: true
+  delete_source_on_success: true
+  delete_data_on_success: false
+  retain_logs_days: 7
+
+# ── validation ───────────────────────────────────────────────────────────────
+validation:
+  require_arm64: true
+  min_free_disk_gb: 10
+  required_tools:
+    - "uv"
+    - "python3"
+  check_firewall: true        # verify master_port reachability pre-launch

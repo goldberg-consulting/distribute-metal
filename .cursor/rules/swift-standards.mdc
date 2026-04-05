@@ -1,0 +1,70 @@
+---
+description: Swift coding standards for concurrency, value types, testing, accessibility, and Swift 6.x features
+globs: **/*.swift
+alwaysApply: false
+---
+
+# Swift Standards
+
+Target Swift 6.2 where possible. Fall back gracefully to 5.9+ when deployment constraints require it. Enforce with SwiftLint.
+
+## Architecture
+- MVVM with SwiftUI: View observes ViewModel, ViewModel owns business logic.
+- Prefer value types (`struct`, `enum`) over reference types.
+- Protocol composition over class inheritance.
+- Dependency injection through initializer or `@Environment`.
+- Split files at approximately 300 lines.
+
+## Concurrency (General)
+- `async`/`await` for all asynchronous work. No `DispatchQueue` in new code.
+- `@MainActor` for UI-bound code. Actors for shared mutable state.
+- `Sendable` compliance throughout. Handle `Task.checkCancellation()`.
+- `TaskGroup` for structured parallel work.
+
+## Concurrency (Swift 6.0+)
+- Complete concurrency checking is enabled by default. Fix warnings, do not suppress them.
+- Region-based isolation (SE-0414) allows the compiler to prove safety without manual `Sendable` conformance in many cases. Trust it.
+- Use the `sending` keyword to transfer values between isolation regions when needed.
+
+## Concurrency (Swift 6.2)
+- Use `-default-isolation MainActor` for UI-focused modules. This makes all types and functions main-actor-isolated by default, eliminating boilerplate `@MainActor` annotations.
+- Mark functions that must run off the main actor with `@concurrent` (SE-0461).
+- `Task.immediate` starts execution synchronously on the caller's executor. Use for work that must begin before the next suspension point.
+- Named tasks: pass `name:` to `Task.init()`, `Task.detached()`, and `addTask()` for debuggability.
+- `weak let` (SE-0481) for immutable weak references. Enables `Sendable` conformance on classes with weak references.
+- `isolated deinit` for actor-isolated classes that need to access their own state during cleanup.
+- Global-actor isolated conformances: `@MainActor Equatable` restricts conformance to the main actor.
+
+## SwiftUI
+- Small, focused view structs. Extract `ViewModifier` for reuse.
+- `@Observable` macro (iOS 17+) for modern observation.
+- `Observations` struct (Swift 6.2) for programmatic observation of `@Observable` changes outside SwiftUI.
+- `NavigationStack` with programmatic navigation paths.
+- Accessibility: labels, traits, and VoiceOver support on every interactive element. This is not optional.
+- Dark mode and Dynamic Type support required on all screens.
+
+## New Types (Swift 6.2)
+- `InlineArray<N, Element>` for fixed-size, stack-allocated arrays. Use when the count is known at compile time and heap allocation is undesirable.
+- `Span` for safe alternatives to `UnsafeBufferPointer`.
+- Raw identifiers (backtick syntax) for test names: `func \`user login succeeds with valid token\`()` instead of a separate `@Test("...")` description string.
+- Default values in string interpolation: `"\(age, default: "Unknown")"` for optionals with cross-type defaults.
+
+## Safety
+- No force unwraps (`!`) except in tests with a comment explaining the invariant.
+- `[weak self]` in closures that outlive their owner.
+- `Codable` with explicit `CodingKeys` when API shapes differ from the model.
+- Keychain for secrets. Never hardcode API keys.
+- Opt-in strict memory safety (SE-0458): use `@safe`/`@unsafe` annotations and the `unsafe` keyword when interfacing with unsafe APIs.
+
+## Documentation
+- Public types and methods require a doc comment describing behavior and contracts.
+- One-liner doc comments for simple functions: `/// Clamp value to [lo, hi].`
+- Do not restate parameter types in prose. Describe what the function does, not its signature.
+
+## Testing
+- XCTest with async test methods (or Swift Testing with `@Test`).
+- Swift 6.2: use raw identifiers for human-readable test names without duplication.
+- Mock via protocols, not concrete classes. Inject dependencies.
+- Snapshot testing for view regression on key screens.
+- Test naming: `test_<behavior>_when_<condition>_expects_<result>` (XCTest) or backtick names (Swift Testing).
+- Minimum 80% coverage on business logic. Do not write tests for trivial getters.

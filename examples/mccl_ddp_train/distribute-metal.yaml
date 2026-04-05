@@ -1,0 +1,57 @@
+version: 1
+
+project:
+  name: mccl-ddp-example
+  root: .
+  working_dir: src
+  entrypoint: train.py
+  include:
+    - src/**
+    - configs/**
+    - pyproject.toml
+    - uv.lock
+  exclude:
+    - .git/**
+    - .venv/**
+    - checkpoints/**
+
+python:
+  version: ">=3.11,<3.14"
+  pyproject: pyproject.toml
+  lockfile: uv.lock
+
+training:
+  backend: mccl
+  torchrun:
+    nproc_per_node: 1
+    master_port: 29500
+    script_args:
+      - --config=../configs/train.yaml
+  env:
+    MCCL_LOG_LEVEL: INFO
+  checkpoint_dir: checkpoints
+  rank0_only:
+    save_checkpoints: true
+    write_logs: true
+
+data: []
+
+sync:
+  mode: bulk
+  parallel_connections: 4
+  chunk_size_mb: 64
+  preferred_interface: auto
+
+cleanup:
+  delete_venv_on_success: true
+  delete_source_on_success: true
+  delete_data_on_success: false
+  retain_logs_days: 7
+
+validation:
+  require_arm64: true
+  min_free_disk_gb: 5
+  required_tools:
+    - uv
+    - python3
+  check_firewall: true

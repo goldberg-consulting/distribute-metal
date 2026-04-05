@@ -1,0 +1,84 @@
+---
+description: Schema and conventions for distribute-metal.yaml job specs used by the DistributeMetal Metal DDP cluster. Apply when generating, editing, or discussing distribute-metal.yaml files.
+globs: "**/distribute-metal.yaml"
+alwaysApply: false
+---
+
+# distribute-metal.yaml spec
+
+DistributeMetal uses a `distribute-metal.yaml` at the project root to define what gets synced to worker Macs and how torchrun launches distributed training on Apple Silicon via the `mccl` backend.
+
+## Schema (v1)
+
+```yaml
+version: 1
+
+project:
+  name: ""                    # required — human-readable
+  root: "."                   # relative to this file
+  working_dir: "."            # cwd for entrypoint, relative to root
+  entrypoint: "train.py"      # required — script run via torchrun
+  include: ["**/*.py", "pyproject.toml", "uv.lock"]
+  exclude: [".git/**", ".venv/**", "__pycache__/**", "checkpoints/**"]
+
+python:
+  version: ">=3.11,<3.14"    # PEP 440
+  pyproject: "pyproject.toml"
+  lockfile: "uv.lock"        # uv.lock strongly recommended
+
+training:
+  backend: "mccl"            # mccl for Metal DDP on Apple Silicon
+  torchrun:
+    nproc_per_node: 1         # 1 per Mac (one MPS device)
+    master_port: 29500        # coordinator may override at runtime
+    script_args: []
+  env: {}
+  checkpoint_dir: "checkpoints"
+  rank0_only:
+    save_checkpoints: true
+    write_logs: true
+
+data:                          # list of datasets/artifacts to sync
+  - name: "trainset"
+    source: "coordinator"      # coordinator | http | s3 | local
+    path: "datasets/train"
+    sha256: ""
+    size_bytes: 0
+    unpack: "none"             # none | tar | tar.gz | tar.zst | zip
+
+sync:
+  mode: "bulk"
+  parallel_connections: 8
+  chunk_size_mb: 64
+  preferred_interface: "auto"  # auto | thunderbolt | ethernet | wifi
+
+cleanup:
+  delete_venv_on_success: true
+  delete_source_on_success: true
+  delete_data_on_success: false
+  retain_logs_days: 7
+
+validation:
+  require_arm64: true
+  min_free_disk_gb: 10
+  required_tools: ["uv", "python3"]
+  check_firewall: true
+```
+
+## Key constraints
+
+- `WORLD_SIZE`, `NODE_RANK`, and `MASTER_ADDR` are assigned by the coordinator at runtime. Never hardcode them in the YAML.
+- `training.backend` should be `mccl` for Apple Silicon Metal DDP. The training script must `import mccl` before calling `dist.init_process_group(backend="mccl")`.
+- `nproc_per_node` is typically 1 per Mac (one MPS GPU per Apple Silicon chip).
+- `pyproject.toml` must declare `torch>=2.5.0` and `mccl>=0.3.0` as dependencies so `uv sync` installs them on every worker.
+
+## MCP tools
+
+The `distribute-metal` MCP server provides live cluster operations:
+
+- **`cluster_status`** — query all peers for hardware, state, and toolchain versions
+- **`peer_preflight`** — check if a specific peer is ready (arch, uv, mccl, disk)
+- **`generate_yaml`** — inspect a project directory and produce a complete spec
+- **`validate_yaml`** — parse an existing spec and report errors
+
+Use these tools when the user asks about cluster readiness, wants to generate a YAML for a new project, or wants to validate an existing one.
