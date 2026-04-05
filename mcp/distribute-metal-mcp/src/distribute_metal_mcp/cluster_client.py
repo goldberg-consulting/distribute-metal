@@ -11,8 +11,21 @@ import yaml
 
 
 PEERS_CONFIG_PATH = Path.home() / ".config" / "distribute-metal" / "peers.yaml"
+TOKEN_FILE = Path.home() / ".config" / "distribute-metal" / "token"
 DEFAULT_AGENT_PORT = 8477
 REQUEST_TIMEOUT = 10.0
+
+
+def load_token() -> str | None:
+    import os
+    token = os.environ.get("DISTRIBUTE_METAL_TOKEN")
+    if token:
+        return token.strip()
+    if TOKEN_FILE.exists():
+        lines = TOKEN_FILE.read_text().strip().splitlines()
+        if lines:
+            return lines[0].strip()
+    return None
 
 
 @dataclass
@@ -87,8 +100,12 @@ def load_peers() -> list[PeerAddress]:
 async def fetch_peer_status(peer: PeerAddress) -> PeerStatus:
     """Query GET /status on a single agent."""
     try:
+        headers = {}
+        token = load_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(f"{peer.base_url}/status")
+            resp = await client.get(f"{peer.base_url}/status", headers=headers)
             resp.raise_for_status()
             data = resp.json()
             return PeerStatus(

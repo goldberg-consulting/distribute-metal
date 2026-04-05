@@ -5,16 +5,32 @@ actor AgentClient {
     private let logger = Logger(subsystem: "one.measured.distribute-metal", category: "AgentClient")
     private let session: URLSession
     private let timeout: TimeInterval = 30
+    private let token: String?
 
     init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
         self.session = URLSession(configuration: config)
+        self.token = Self.loadToken()
     }
 
     private func url(for peer: Peer, path: String) -> URL {
         URL(string: "http://\(peer.ipAddress):\(peer.port)\(path)")!
+    }
+
+    private static func loadToken() -> String? {
+        if let env = ProcessInfo.processInfo.environment["DISTRIBUTE_METAL_TOKEN"], !env.isEmpty {
+            return env
+        }
+        let tokenFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/distribute-metal/token")
+        if let data = try? String(contentsOf: tokenFile, encoding: .utf8) {
+            let line = data.trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .newlines).first ?? ""
+            if !line.isEmpty { return line }
+        }
+        return nil
     }
 
     // MARK: - Status
@@ -66,6 +82,7 @@ actor AgentClient {
         var request = URLRequest(url: url(for: peer, path: "/jobs/\(jobId)/bundle"))
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
         let (data, _) = try await session.upload(for: request, fromFile: archiveURL)
         return try JSONDecoder().decode(AgentResponse.self, from: data)
@@ -77,6 +94,7 @@ actor AgentClient {
         var request = URLRequest(url: url(for: peer, path: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, _) = try await session.data(for: request)

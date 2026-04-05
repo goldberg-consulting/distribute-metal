@@ -37,6 +37,7 @@ from .sysinfo import (
     get_python_version,
     get_uv_available,
 )
+from .auth import AuthMiddleware, load_token
 from .workspace import clean_workspace, ensure_workspace, provision_venv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -55,6 +56,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="measured.one.distribute-metal Agent", version=__version__, lifespan=lifespan)
+
+_token = load_token()
+if _token:
+    app.add_middleware(AuthMiddleware, token=_token)
+    logger.info("Authentication enabled (token loaded)")
+else:
+    logger.warning("No cluster token found. Agent is running WITHOUT authentication. "
+                   "Set DISTRIBUTE_METAL_TOKEN or create ~/.config/distribute-metal/token")
 
 
 @app.get("/status")
