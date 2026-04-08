@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Network
 import Combine
@@ -23,11 +22,10 @@ final class DiscoveryService: ObservableObject {
 
     private var browser: NWBrowser?
     private var localBrowser: NWBrowser?
-    private var dnssdProcess: Process?
+    private var listener: NWListener?
     private let queue = DispatchQueue(label: "one.measured.distribute-metal.discovery", qos: .userInitiated)
     private let client = AgentClient()
     private var probeTask: Task<Void, Never>?
-    private var advertisingTask: Task<Void, Never>?
     private var inFlightProbeKeys: Set<String> = []
 
     private init() {}
@@ -35,63 +33,107 @@ final class DiscoveryService: ObservableObject {
     // MARK: - Advertise
 
     func startAdvertising() {
-        advertisingTask?.cancel()
-
-        if let dnssdProcess, dnssdProcess.isRunning {
-            dnssdProcess.terminate()
-        }
-        dnssdProcess = nil
+        stopAdvertising()
+        killLegacyAdvertisers()
 
         let name = NetworkUtils.sanitizedComputerName
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let ip = NetworkUtils.localIPAddress ?? "unknown"
-        let serviceType = self.serviceType
-        let port = String(agentPort.rawValue)
 
-        advertisingTask = Task {
-            let stalePIDs = await Task.detached(priority: .utility) {
-                Self.staleAdvertiserPIDs(serviceType: serviceType, port: port)
-            }.value
+        var txtRecord = NWTXTRecord()
+        txtRecord["ver"] = version
+        txtRecord["arch"] = "arm64"
+        txtRecord["ip"] = ip
 
-            guard !Task.isCancelled else { return }
+        let params = NWParameters.tcp
+        params.includePeerToPeer = true
 
-            cleanupStaleAdvertisers(stalePIDs)
-            guard !Task.isCancelled else { return }
-
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
-            process.arguments = [
-                "-R", name, serviceType, "local.", port,
-                "ver=\(version)",
-                "arch=arm64",
-                "ip=\(ip)"
-            ]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { [weak self] terminated in
-                Task { @MainActor in
-                    if self?.dnssdProcess?.processIdentifier == terminated.processIdentifier {
-                        self?.dnssdProcess = nil
-                    }
+        do {
+            let newListener = try NWListener(using: params)
+            newListener.service = NWListener.Service(
+                name: name,
+                type: serviceType,
+                txtRecord: txtRecord
+            )
+            newListener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.logger.info("Listener ready, advertising \(name)")
+                case .failed(let err):
+                    self.logger.error("Listener failed: \(err.localizedDescription)")
+                default:
+                    break
                 }
             }
-
-            do {
-                try process.run()
-                dnssdProcess = process
-                logger.info("Advertising as \(name) on \(serviceType)")
-            } catch {
-                logger.error("Failed to start dns-sd: \(error.localizedDescription)")
+            newListener.newConnectionHandler = { connection in
+                connection.cancel()
             }
+            newListener.start(queue: queue)
+            listener = newListener
+            logger.info("Advertising as \(name) on \(self.serviceType)")
+        } catch {
+            logger.error("Failed to create listener: \(error.localizedDescription)")
         }
     }
 
     func stopAdvertising() {
-        advertisingTask?.cancel()
-        advertisingTask = nil
-        if let p = dnssdProcess, p.isRunning { p.terminate() }
-        dnssdProcess = nil
+        listener?.cancel()
+        listener = nil
         logger.info("Stopped advertising")
+    }
+
+    private func killLegacyAdvertisers() {
+        let serviceType = self.serviceType
+        let port = String(agentPort.rawValue)
+        Task.detached(priority: .utility) {
+            let pids = Self.legacyAdvertiserPIDs(serviceType: serviceType, port: port)
+            for pid in pids {
+                kill(pid, SIGTERM)
+            }
+        }
+    }
+
+    private nonisolated static func legacyAdvertiserPIDs(serviceType: String, port: String) -> [pid_t] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,command="]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+
+        guard process.terminationStatus == 0 else { return [] }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let text = String(decoding: data, as: UTF8.self)
+
+        return text
+            .split(separator: "\n")
+            .compactMap { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return nil }
+
+                let fields = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+                guard fields.count == 2, let pid = Int32(String(fields[0])) else { return nil }
+
+                let command = String(fields[1])
+                let commandFields = command.split(whereSeparator: \.isWhitespace)
+                guard pid != ProcessInfo.processInfo.processIdentifier else { return nil }
+                guard commandFields.count >= 6 else { return nil }
+                guard commandFields[0].hasSuffix("dns-sd") else { return nil }
+                guard commandFields[1] == "-R" else { return nil }
+                guard commandFields[3] == Substring(serviceType) else { return nil }
+                guard commandFields[4] == "local." else { return nil }
+                guard commandFields[5] == Substring(port) else { return nil }
+                return pid
+            }
     }
 
     // MARK: - Browse
@@ -389,61 +431,6 @@ final class DiscoveryService: ObservableObject {
                 scheduleProbe(for: peer)
             }
         }
-    }
-
-    private func cleanupStaleAdvertisers(_ stalePIDs: [pid_t]) {
-        guard !stalePIDs.isEmpty else { return }
-
-        for pid in stalePIDs where kill(pid, SIGTERM) == 0 {
-            logger.info("Stopped stale dns-sd advertiser pid \(pid, privacy: .public)")
-        }
-    }
-
-    private nonisolated static func staleAdvertiserPIDs(serviceType: String, port: String) -> [pid_t] {
-        let logger = Logger(subsystem: "one.measured.distribute-metal", category: "Discovery")
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,command="]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            logger.error("Failed to inspect dns-sd registrations: \(error.localizedDescription)")
-            return []
-        }
-
-        guard process.terminationStatus == 0 else {
-            logger.error("Process scan exited with status \(process.terminationStatus, privacy: .public)")
-            return []
-        }
-
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        let text = String(decoding: data, as: UTF8.self)
-
-        return text
-            .split(separator: "\n")
-            .compactMap { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty else { return nil }
-
-                let fields = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-                guard fields.count == 2, let pid = Int32(String(fields[0])) else { return nil }
-
-                let command = String(fields[1])
-                let commandFields = command.split(whereSeparator: \.isWhitespace)
-                guard pid != ProcessInfo.processInfo.processIdentifier else { return nil }
-                guard commandFields.count >= 6 else { return nil }
-                guard commandFields[0].hasSuffix("dns-sd") else { return nil }
-                guard commandFields[1] == "-R" else { return nil }
-                guard commandFields[3] == Substring(serviceType) else { return nil }
-                guard commandFields[4] == "local." else { return nil }
-                guard commandFields[5] == Substring(port) else { return nil }
-                return pid
-            }
     }
 
     // MARK: - Manual add
