@@ -36,7 +36,6 @@ final class DiscoveryService: ObservableObject {
         stopAdvertising()
         killLegacyAdvertisers()
 
-        let name = NetworkUtils.sanitizedComputerName
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let ip = NetworkUtils.localIPAddress ?? "unknown"
 
@@ -51,17 +50,26 @@ final class DiscoveryService: ObservableObject {
         do {
             let newListener = try NWListener(using: params)
             newListener.service = NWListener.Service(
-                name: name,
+                name: nil,
                 type: serviceType,
                 txtRecord: txtRecord
             )
+            newListener.serviceRegistrationUpdateHandler = { [weak self] change in
+                switch change {
+                case .add(let endpoint):
+                    self?.logger.info("Registered Bonjour service: \(endpoint.debugDescription, privacy: .public)")
+                case .remove(let endpoint):
+                    self?.logger.info("Removed Bonjour service: \(endpoint.debugDescription, privacy: .public)")
+                @unknown default:
+                    break
+                }
+            }
             newListener.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
                 switch state {
                 case .ready:
-                    self.logger.info("Listener ready, advertising \(name)")
+                    self?.logger.info("Listener ready")
                 case .failed(let err):
-                    self.logger.error("Listener failed: \(err.localizedDescription)")
+                    self?.logger.error("Listener failed: \(err.localizedDescription)")
                 default:
                     break
                 }
@@ -71,7 +79,7 @@ final class DiscoveryService: ObservableObject {
             }
             newListener.start(queue: queue)
             listener = newListener
-            logger.info("Advertising as \(name) on \(self.serviceType)")
+            logger.info("Advertising on \(self.serviceType)")
         } catch {
             logger.error("Failed to create listener: \(error.localizedDescription)")
         }
@@ -370,12 +378,15 @@ final class DiscoveryService: ObservableObject {
 
     private func handleBrowseResults(_ results: Set<NWBrowser.Result>) {
         let localIP = normalizedAddress(NetworkUtils.localIPAddress)
-        let localName = NetworkUtils.sanitizedComputerName
+        let localNames: Set<String> = [
+            NetworkUtils.sanitizedComputerName,
+            NetworkUtils.computerName,
+        ]
 
         for result in results {
             guard case .service(let name, let type, _, _) = result.endpoint else { continue }
             guard type.contains(serviceType) else { continue }
-            guard name != localName else { continue }
+            guard !localNames.contains(name) else { continue }
 
             let hostname = "\(name).local"
             var txtFields: [String: String] = [:]
