@@ -2,11 +2,10 @@ import Foundation
 
 enum PeerStatus: String, Codable {
     case discovered
-    case paired
-    case preflight
+    case unreachable
+    case agentFailed
     case ready
     case busy
-    case offline
 }
 
 struct Peer: Identifiable, Codable, Hashable {
@@ -26,10 +25,30 @@ struct Peer: Identifiable, Codable, Hashable {
     var pythonVersion: String?
     var uvAvailable: Bool?
     var freeDiskGB: Double?
+    var statusDetail: String?
+    var sshUser: String?
+    var receiveRoot: String?
+    var sshConfigured: Bool = false
+    var lastBenchmarkMbps: Double?
+    var lastBenchmarkLatencyMs: Double?
 
     var lastSeen: Date
 
     var displayAddress: String { "\(ipAddress):\(port)" }
+    var statusLabel: String {
+        switch status {
+        case .discovered:
+            return "discovered"
+        case .unreachable:
+            return "unreachable"
+        case .agentFailed:
+            return "agent failed"
+        case .ready:
+            return "ready"
+        case .busy:
+            return "busy"
+        }
+    }
 
     static func manual(name: String, ip: String, port: Int = 8477) -> Peer {
         Peer(

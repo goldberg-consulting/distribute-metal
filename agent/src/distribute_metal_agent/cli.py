@@ -23,7 +23,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"Error: no pyproject.toml in {project}", file=sys.stderr)
         sys.exit(1)
 
-    entrypoint = _detect_entrypoint(project)
+    detected_entrypoint = _detect_entrypoint(project)
+    working_dir = str(Path(detected_entrypoint).parent)
+    if working_dir == ".":
+        working_dir = "."
+    entrypoint = Path(detected_entrypoint).name
     name = project.name.lower().replace(" ", "-")
     has_lockfile = (project / "uv.lock").exists()
     data_dirs = _detect_data_dirs(project)
@@ -45,6 +49,8 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 project:
   name: "{name}"
+  root: "."
+  working_dir: "{working_dir}"
   entrypoint: "{entrypoint}"
   include:
 {include_lines}
@@ -68,7 +74,7 @@ training:
 {data_block}
 
 sync:
-  mode: "bulk"
+  mode: "rsync-push"
   parallel_connections: 8
   chunk_size_mb: 64
 
@@ -95,6 +101,7 @@ validation:
     print(f"Created {out}")
     print(f"  project:    {name}")
     print(f"  entrypoint: {entrypoint}")
+    print(f"  working dir: {working_dir}")
     print(f"  python:     {python_version}")
     if data_dirs:
         print(f"  data dirs:  {', '.join(data_dirs)}")

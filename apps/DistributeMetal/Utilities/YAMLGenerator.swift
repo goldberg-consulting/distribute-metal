@@ -22,7 +22,9 @@ enum YAMLGenerator {
             throw Error.noPyproject(root)
         }
 
-        let entrypoint = detectEntrypoint(in: projectURL) ?? "train.py"
+        let detectedEntrypoint = detectEntrypoint(in: projectURL) ?? "train.py"
+        let workingDir = workingDirectory(for: detectedEntrypoint)
+        let entrypoint = URL(fileURLWithPath: detectedEntrypoint).lastPathComponent
         let name = projectURL.lastPathComponent
             .replacingOccurrences(of: " ", with: "-")
             .lowercased()
@@ -35,6 +37,8 @@ enum YAMLGenerator {
 
         project:
           name: "\(name)"
+          root: "."
+          working_dir: "\(workingDir)"
           entrypoint: "\(entrypoint)"
           include:
             - "**/*.py"
@@ -83,7 +87,7 @@ enum YAMLGenerator {
 
 
         sync:
-          mode: "bulk"
+          mode: "rsync-push"
           parallel_connections: 8
           chunk_size_mb: 64
 
@@ -126,6 +130,11 @@ enum YAMLGenerator {
         }
 
         return nil
+    }
+
+    private static func workingDirectory(for entrypoint: String) -> String {
+        let directory = URL(fileURLWithPath: entrypoint).deletingLastPathComponent().path
+        return directory.isEmpty || directory == "/" ? "." : directory
     }
 
     private static func detectDataDirs(in url: URL) -> [String] {

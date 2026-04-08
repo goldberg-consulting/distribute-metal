@@ -3,6 +3,11 @@ import Network
 import Combine
 import os.log
 
+/// Tracks Bonjour-visible peers, probes the agent on each peer, and records
+/// link benchmark results for the menu bar UI.
+///
+/// Discovery keys peers by either TXT-provided IP or Bonjour hostname so a row
+/// can survive transitions from hostname-only discovery to a concrete address.
 @MainActor
 final class DiscoveryService: ObservableObject {
     static let shared = DiscoveryService()
@@ -13,6 +18,7 @@ final class DiscoveryService: ObservableObject {
 
     @Published var discoveredPeers: [String: Peer] = [:]
     @Published var isScanning = false
+    @Published var benchmarkingPeerIDs: Set<UUID> = []
 
     private var browser: NWBrowser?
     private var localBrowser: NWBrowser?
@@ -130,23 +136,9 @@ final class DiscoveryService: ObservableObject {
                     group.addTask { [client] in
                         do {
                             let status = try await client.fetchStatus(from: peer)
-                            var updated = peer
-                            updated.status = Self.mapAgentState(status.state)
-                            updated.arch = status.arch
-                            updated.chip = status.chip
-                            updated.memoryGB = status.memoryGB
-                            updated.macOSVersion = status.macOSVersion
-                            updated.agentVersion = status.agentVersion
-                            updated.mcclVersion = status.mcclVersion
-                            updated.pythonVersion = status.pythonVersion
-                            updated.uvAvailable = status.uvAvailable
-                            updated.freeDiskGB = status.freeDiskGB
-                            updated.lastSeen = Date()
-                            return (ip, updated)
+                            return (ip, Self.updatedPeer(from: status, peer: peer))
                         } catch {
-                            var updated = peer
-                            updated.status = .offline
-                            return (ip, updated)
+                            return (ip, Self.unreachablePeer(from: peer, error: error))
                         }
                     }
                 }
@@ -162,23 +154,9 @@ final class DiscoveryService: ObservableObject {
     func probePeer(_ peer: Peer) async -> Peer {
         do {
             let status = try await client.fetchStatus(from: peer)
-            var updated = peer
-            updated.status = Self.mapAgentState(status.state)
-            updated.arch = status.arch
-            updated.chip = status.chip
-            updated.memoryGB = status.memoryGB
-            updated.macOSVersion = status.macOSVersion
-            updated.agentVersion = status.agentVersion
-            updated.mcclVersion = status.mcclVersion
-            updated.pythonVersion = status.pythonVersion
-            updated.uvAvailable = status.uvAvailable
-            updated.freeDiskGB = status.freeDiskGB
-            updated.lastSeen = Date()
-            return updated
+            return Self.updatedPeer(from: status, peer: peer)
         } catch {
-            var updated = peer
-            updated.status = .offline
-            return updated
+            return Self.unreachablePeer(from: peer, error: error)
         }
     }
 
@@ -189,8 +167,53 @@ final class DiscoveryService: ObservableObject {
         case .syncing, .provisioning, .launching, .running:
             return .busy
         case .failed:
-            return .offline
+            return .agentFailed
         }
+    }
+
+    private nonisolated static func updatedPeer(from status: AgentStatusResponse, peer: Peer) -> Peer {
+        var updated = peer
+        updated.status = mapAgentState(status.state)
+        updated.arch = status.arch
+        updated.chip = status.chip
+        updated.memoryGB = status.memoryGB
+        updated.macOSVersion = status.macOSVersion
+        updated.agentVersion = status.agentVersion
+        updated.mcclVersion = status.mcclVersion
+        updated.pythonVersion = status.pythonVersion
+        updated.uvAvailable = status.uvAvailable
+        updated.freeDiskGB = status.freeDiskGB
+        updated.statusDetail = status.state == .failed ? "agent reported failure" : nil
+        updated.lastSeen = Date()
+        return updated
+    }
+
+    private nonisolated static func unreachablePeer(from peer: Peer, error: Error) -> Peer {
+        var updated = peer
+        updated.status = .unreachable
+        updated.statusDetail = probeFailureDescription(error)
+        return updated
+    }
+
+    private nonisolated static func probeFailureDescription(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cannotConnectToHost:
+                return "cannot connect to agent"
+            case .timedOut:
+                return "agent probe timed out"
+            case .notConnectedToInternet:
+                return "network unavailable"
+            case .networkConnectionLost:
+                return "network connection lost"
+            default:
+                return urlError.localizedDescription
+            }
+        }
+        if let clientError = error as? AgentClientError {
+            return clientError.localizedDescription
+        }
+        return error.localizedDescription
     }
 
     private func normalizedAddress(_ address: String?) -> String? {
@@ -256,6 +279,7 @@ final class DiscoveryService: ObservableObject {
         current.pythonVersion = probed.pythonVersion ?? current.pythonVersion
         current.uvAvailable = probed.uvAvailable ?? current.uvAvailable
         current.freeDiskGB = probed.freeDiskGB ?? current.freeDiskGB
+        current.statusDetail = probed.statusDetail
         current.lastSeen = probed.lastSeen
         return current
     }
@@ -285,7 +309,7 @@ final class DiscoveryService: ObservableObject {
             let previousPeer = discoveredPeers[previousKey]
             let shouldProbe = previousPeer == nil
                 || previousPeer?.ipAddress != address
-                || previousPeer?.status == .offline
+                || previousPeer?.status == .unreachable
 
             var peer = previousPeer ?? Peer(
                 id: UUID(),
@@ -338,6 +362,90 @@ final class DiscoveryService: ObservableObject {
 
     func removePeer(ip: String) {
         discoveredPeers.removeValue(forKey: peerKey(for: ip))
+    }
+
+    func updatePeer(_ peer: Peer) {
+        let key = existingPeerKey(
+            for: peer.hostname,
+            ip: normalizedAddress(peer.ipAddress)
+        ) ?? peerKey(for: peer.ipAddress)
+        discoveredPeers[key] = peer
+    }
+
+    /// Runs a bidirectional worker-to-worker benchmark between the local agent
+    /// and the selected peer. The stored throughput keeps the slower direction,
+    /// which is the useful number when the link is asymmetric.
+    func benchmarkPeer(_ peer: Peer) async throws {
+        guard let localIP = normalizedAddress(NetworkUtils.localIPAddress) else {
+            throw NSError(domain: "DiscoveryService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Local IP address is unavailable"])
+        }
+
+        benchmarkingPeerIDs.insert(peer.id)
+        defer { benchmarkingPeerIDs.remove(peer.id) }
+
+        let localPeer = Peer.manual(name: NetworkUtils.sanitizedComputerName, ip: "127.0.0.1", port: Int(agentPort.rawValue))
+        let bytes = 128 * 1024 * 1024
+
+        let forwardSession = UUID().uuidString
+        let forwardReceiver = try await client.startBenchmarkReceiver(peer: localPeer, sessionId: forwardSession, maxBytes: bytes)
+        let forwardSender = try await client.runBenchmarkSender(
+            peer: peer,
+            request: BenchSenderRequest(
+                sessionId: forwardSession,
+                host: localIP,
+                port: forwardReceiver.port,
+                bytesToSend: bytes,
+                chunkSize: 1024 * 1024
+            )
+        )
+        let forwardResult = try await waitForBenchmarkResult(peer: localPeer, sessionId: forwardSession)
+
+        let reverseSession = UUID().uuidString
+        let reverseReceiver = try await client.startBenchmarkReceiver(peer: peer, sessionId: reverseSession, maxBytes: bytes)
+        let reverseSender = try await client.runBenchmarkSender(
+            peer: localPeer,
+            request: BenchSenderRequest(
+                sessionId: reverseSession,
+                host: peer.ipAddress,
+                port: reverseReceiver.port,
+                bytesToSend: bytes,
+                chunkSize: 1024 * 1024
+            )
+        )
+        let reverseResult = try await waitForBenchmarkResult(peer: peer, sessionId: reverseSession)
+
+        var updated = peer
+        updated.lastBenchmarkMbps = min(
+            forwardResult.throughputMbps ?? forwardSender.throughputMbps,
+            reverseResult.throughputMbps ?? reverseSender.throughputMbps
+        )
+        updated.lastBenchmarkLatencyMs = (forwardSender.connectLatencyMs + reverseSender.connectLatencyMs) / 2
+        updatePeer(updated)
+    }
+
+    private func waitForBenchmarkResult(peer: Peer, sessionId: String) async throws -> BenchResultResponse {
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline {
+            let result = try await client.fetchBenchmarkResult(peer: peer, sessionId: sessionId)
+            switch result.state {
+            case .pending:
+                try await Task.sleep(for: .milliseconds(250))
+            case .completed:
+                return result
+            case .failed:
+                throw NSError(
+                    domain: "DiscoveryService",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: result.error ?? "benchmark failed"]
+                )
+            }
+        }
+
+        throw NSError(
+            domain: "DiscoveryService",
+            code: 3,
+            userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for benchmark result"]
+        )
     }
 }
 

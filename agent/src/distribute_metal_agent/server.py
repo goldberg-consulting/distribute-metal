@@ -7,26 +7,35 @@ Run with:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+import sys
 import threading
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 
 from . import __version__
+from .bench import get_result, run_sender, start_receiver
 from .models import (
     AgentResponse,
     AgentState,
+    BenchReceiverRequest,
+    BenchReceiverResponse,
+    BenchResultResponse,
+    BenchSenderRequest,
+    BenchSenderResponse,
     CleanRequest,
+    JobInitRequest,
     LaunchRequest,
     PrepareRequest,
+    SSHAuthorizeRequest,
+    SSHAuthorizeResponse,
     StatusResponse,
     StopRequest,
 )
 from .runner import is_running, launch_torchrun, poll_exit_code, read_logs, stop_job
+from .ssh_setup import authorize_public_key, current_ssh_user, host_public_keys, rsync_available
 from .sysinfo import (
     get_arch,
     get_chip,
@@ -38,7 +47,14 @@ from .sysinfo import (
     get_uv_available,
 )
 from .auth import AuthMiddleware, load_token
-from .workspace import clean_workspace, ensure_workspace, provision_venv
+from .workspace import (
+    clean_workspace,
+    initialize_job_workspace,
+    load_job_spec,
+    promote_incoming,
+    provision_venv,
+    receive_root,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("distribute-metal-agent")
@@ -62,8 +78,10 @@ if _token:
     app.add_middleware(AuthMiddleware, token=_token)
     logger.info("Authentication enabled (token loaded)")
 else:
-    logger.warning("No cluster token found. Agent is running WITHOUT authentication. "
-                   "Set DISTRIBUTE_METAL_TOKEN or create ~/.config/distribute-metal/token")
+    logger.warning(
+        "No cluster token found. Agent is running WITHOUT authentication. "
+        "Set DISTRIBUTE_METAL_TOKEN or create ~/.config/distribute-metal/token"
+    )
 
 
 @app.get("/status")
@@ -90,26 +108,45 @@ async def status() -> StatusResponse:
     )
 
 
-@app.post("/jobs/prepare")
-async def prepare(req: PrepareRequest) -> AgentResponse:
+@app.post("/jobs/init")
+async def init_job(req: JobInitRequest) -> AgentResponse:
     global state, current_job_id
 
     if state not in (AgentState.idle, AgentState.failed, AgentState.cleaned):
-        raise HTTPException(400, f"Cannot prepare: agent is {state.value}")
+        raise HTTPException(400, f"Cannot initialize job: agent is {state.value}")
 
     current_job_id = req.job_id
     state = AgentState.syncing
 
     try:
-        ensure_workspace(req.job_id)
+        initialize_job_workspace(req.job_id, req.spec)
     except Exception as exc:
         state = AgentState.failed
         return AgentResponse(ok=False, message=str(exc), state=state)
 
+    return AgentResponse(ok=True, message="Initialized for sync", state=state)
+
+
+@app.post("/jobs/prepare")
+async def prepare(req: PrepareRequest) -> AgentResponse:
+    global state, current_job_id
+
+    if current_job_id != req.job_id:
+        raise HTTPException(400, "Job ID mismatch")
+    if state != AgentState.syncing:
+        raise HTTPException(400, f"Cannot prepare: agent is {state.value}")
+
+    try:
+        promote_incoming(req.job_id)
+    except Exception as exc:
+        state = AgentState.failed
+        return AgentResponse(ok=False, message=str(exc), state=state)
+
+    state = AgentState.provisioning
+
     def _provision():
         global state
         try:
-            state = AgentState.provisioning
             provision_venv(req.job_id)
             state = AgentState.ready
         except Exception as exc:
@@ -120,7 +157,7 @@ async def prepare(req: PrepareRequest) -> AgentResponse:
     t.start()
     _provision_threads[req.job_id] = t
 
-    return AgentResponse(ok=True, message="Preparing", state=state)
+    return AgentResponse(ok=True, message="Provisioning", state=state)
 
 
 @app.post("/jobs/launch")
@@ -136,15 +173,18 @@ async def launch(req: LaunchRequest) -> AgentResponse:
     state = AgentState.launching
 
     try:
-        spec = {}  # Full spec would be loaded from workspace manifest
+        spec = load_job_spec(req.job_id)
         launch_torchrun(
             job_id=req.job_id,
-            entrypoint="train.py",
+            entrypoint=spec.project.entrypoint,
             master_addr=req.master_addr,
             master_port=req.master_port,
             world_size=req.world_size,
             node_rank=req.node_rank,
             nproc_per_node=req.nproc_per_node,
+            script_args=spec.training.torchrun.script_args,
+            env_overrides=spec.training.env,
+            working_dir=spec.project.working_dir if spec.project.working_dir != "." else None,
         )
         state = AgentState.running
         return AgentResponse(ok=True, message="Launched", state=state)
@@ -178,11 +218,66 @@ async def clean(req: CleanRequest) -> AgentResponse:
     return AgentResponse(ok=True, message="Cleaned", state=state)
 
 
+@app.post("/ssh/authorize")
+async def authorize_ssh(req: SSHAuthorizeRequest) -> SSHAuthorizeResponse:
+    authorize_public_key(
+        public_key=req.public_key,
+        key_name=req.key_name,
+        receive_root=receive_root(),
+        python_executable=sys.executable,
+    )
+    return SSHAuthorizeResponse(
+        message="SSH key authorized for push sync",
+        ssh_user=current_ssh_user(),
+        host_keys=host_public_keys(),
+        receive_root=str(receive_root()),
+        rsync_available=rsync_available(),
+    )
+
+
+def _ensure_bench_available() -> None:
+    if state in (AgentState.syncing, AgentState.provisioning, AgentState.launching, AgentState.running):
+        raise HTTPException(400, f"Cannot run benchmark while agent is {state.value}")
+
+
+@app.post("/diag/bench/receiver", response_model=BenchReceiverResponse)
+async def bench_receiver(req: BenchReceiverRequest) -> BenchReceiverResponse:
+    _ensure_bench_available()
+    try:
+        port = start_receiver(req.session_id, req.max_bytes)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return BenchReceiverResponse(session_id=req.session_id, port=port)
+
+
+@app.post("/diag/bench/sender", response_model=BenchSenderResponse)
+async def bench_sender(req: BenchSenderRequest) -> BenchSenderResponse:
+    _ensure_bench_available()
+    try:
+        return run_sender(
+            session_id=req.session_id,
+            host=req.host,
+            port=req.port,
+            bytes_to_send=req.bytes_to_send,
+            chunk_size=req.chunk_size,
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/diag/bench/{session_id}", response_model=BenchResultResponse)
+async def bench_result(session_id: str) -> BenchResultResponse:
+    try:
+        return get_result(session_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Benchmark session not found") from exc
+
+
 @app.put("/jobs/{job_id}/bundle")
 async def upload_bundle(job_id: str):
     """Placeholder for bundle upload. V1 expects the project to be
     pre-synced to the workspace or fetched from the coordinator file server."""
-    raise HTTPException(501, "Bundle upload not yet implemented — use coordinator file server")
+    raise HTTPException(501, "Bundle upload not implemented. Use SSH/rsync sync.")
 
 
 def main():

@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 _active_processes: dict[str, subprocess.Popen] = {}
 
 
+def _resolve_within(root: Path, relative_path: str | None) -> Path:
+    candidate = Path(relative_path or ".")
+    if candidate.is_absolute():
+        raise ValueError(f"Path must be relative: {candidate}")
+
+    resolved_root = root.resolve()
+    resolved_path = (resolved_root / candidate).resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes workspace root: {candidate}") from exc
+    return resolved_path
+
+
 def launch_torchrun(
     job_id: str,
     entrypoint: str,
@@ -30,7 +44,9 @@ def launch_torchrun(
     venv = d / ".venv"
     src = d / "src"
 
-    cwd = src / working_dir if working_dir else src
+    cwd = _resolve_within(src, working_dir)
+    entrypoint_path = _resolve_within(cwd, entrypoint)
+    entrypoint_arg = str(entrypoint_path.relative_to(cwd))
     log_file = d / "logs" / "torchrun.log"
 
     torchrun_bin = venv / "bin" / "torchrun"
@@ -46,7 +62,7 @@ def launch_torchrun(
         f"--node_rank={node_rank}",
         f"--master_addr={master_addr}",
         f"--master_port={master_port}",
-        entrypoint,
+        entrypoint_arg,
     ]
     if script_args:
         cmd.extend(script_args)

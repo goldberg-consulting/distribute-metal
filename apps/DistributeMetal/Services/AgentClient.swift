@@ -1,6 +1,27 @@
 import Foundation
 import os.log
 
+enum AgentClientError: LocalizedError {
+    case invalidResponse
+    case httpStatus(Int, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponse:
+            return "The agent returned an invalid response."
+        case .httpStatus(let code, let body):
+            if body.isEmpty {
+                return "The agent returned HTTP \(code)."
+            }
+            return "The agent returned HTTP \(code): \(body)"
+        }
+    }
+}
+
+/// Thin HTTP client for the worker agent API.
+///
+/// The bearer token is read from the same environment variable or token file as
+/// the menu bar app and MCP integration, so the control plane stays aligned.
 actor AgentClient {
     private let logger = Logger(subsystem: "one.measured.distribute-metal", category: "AgentClient")
     private let session: URLSession
@@ -46,68 +67,129 @@ actor AgentClient {
     // MARK: - Status
 
     func fetchStatus(from peer: Peer) async throws -> AgentStatusResponse {
-        let (data, _) = try await session.data(from: url(for: peer, path: "/status"))
-        return try JSONDecoder().decode(AgentStatusResponse.self, from: data)
+        try await request(peer: peer, path: "/status", method: "GET")
+    }
+
+    // MARK: - Job init
+
+    func initializeJob(peer: Peer, jobId: String, spec: JobSpec) async throws -> AgentResponse {
+        let req = JobInitRequest(jobId: jobId, spec: spec)
+        return try await request(peer: peer, path: "/jobs/init", method: "POST", body: req)
     }
 
     // MARK: - Prepare (send job spec, trigger bundle sync + venv provision)
 
-    func prepare(peer: Peer, jobId: String, spec: JobSpec) async throws -> AgentResponse {
-        let req = PrepareRequest(jobId: jobId, spec: spec)
-        return try await post(peer: peer, path: "/jobs/prepare", body: req)
+    func prepare(peer: Peer, jobId: String) async throws -> AgentResponse {
+        let req = PrepareRequest(jobId: jobId)
+        return try await request(peer: peer, path: "/jobs/prepare", method: "POST", body: req)
     }
 
     // MARK: - Launch (start torchrun with assigned rank)
 
     func launch(peer: Peer, request: LaunchRequest) async throws -> AgentResponse {
-        return try await post(peer: peer, path: "/jobs/launch", body: request)
+        try await self.request(peer: peer, path: "/jobs/launch", method: "POST", body: request)
     }
 
     // MARK: - Stop
 
     func stop(peer: Peer, jobId: String) async throws -> AgentResponse {
         let body = ["job_id": jobId]
-        return try await post(peer: peer, path: "/jobs/stop", body: body)
+        return try await request(peer: peer, path: "/jobs/stop", method: "POST", body: body)
     }
 
     // MARK: - Clean
 
     func clean(peer: Peer, jobId: String) async throws -> AgentResponse {
         let body = ["job_id": jobId]
-        return try await post(peer: peer, path: "/jobs/clean", body: body)
+        return try await request(peer: peer, path: "/jobs/clean", method: "POST", body: body)
     }
 
     // MARK: - Logs
 
     func fetchLogs(from peer: Peer, jobId: String, tail: Int = 200) async throws -> [String] {
-        let (data, _) = try await session.data(
-            from: url(for: peer, path: "/jobs/\(jobId)/logs?tail=\(tail)")
-        )
-        return try JSONDecoder().decode([String].self, from: data)
+        try await request(peer: peer, path: "/jobs/\(jobId)/logs?tail=\(tail)", method: "GET")
+    }
+
+    // MARK: - SSH sync setup
+
+    func authorizeSSH(peer: Peer, publicKey: String, keyName: String) async throws -> SSHAuthorizeResponse {
+        let req = SSHAuthorizeRequest(publicKey: publicKey, keyName: keyName)
+        return try await request(peer: peer, path: "/ssh/authorize", method: "POST", body: req)
+    }
+
+    // MARK: - Benchmarks
+
+    func startBenchmarkReceiver(peer: Peer, sessionId: String, maxBytes: Int) async throws -> BenchReceiverResponse {
+        let req = BenchReceiverRequest(sessionId: sessionId, maxBytes: maxBytes)
+        return try await request(peer: peer, path: "/diag/bench/receiver", method: "POST", body: req)
+    }
+
+    func runBenchmarkSender(peer: Peer, request: BenchSenderRequest) async throws -> BenchSenderResponse {
+        try await self.request(peer: peer, path: "/diag/bench/sender", method: "POST", body: request)
+    }
+
+    func fetchBenchmarkResult(peer: Peer, sessionId: String) async throws -> BenchResultResponse {
+        try await request(peer: peer, path: "/diag/bench/\(sessionId)", method: "GET")
     }
 
     // MARK: - Upload bundle archive
 
     func uploadBundle(to peer: Peer, jobId: String, archiveURL: URL) async throws -> AgentResponse {
-        var request = URLRequest(url: url(for: peer, path: "/jobs/\(jobId)/bundle"))
-        request.httpMethod = "PUT"
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        var urlRequest = URLRequest(url: url(for: peer, path: "/jobs/\(jobId)/bundle"))
+        urlRequest.httpMethod = "PUT"
+        urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        if let token { urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
-        let (data, _) = try await session.upload(for: request, fromFile: archiveURL)
+        let (data, response) = try await session.upload(for: urlRequest, fromFile: archiveURL)
+        try validate(response: response, data: data)
         return try JSONDecoder().decode(AgentResponse.self, from: data)
     }
 
     // MARK: - Helpers
 
-    private func post<T: Encodable>(peer: Peer, path: String, body: T) async throws -> AgentResponse {
-        var request = URLRequest(url: url(for: peer, path: path))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        request.httpBody = try JSONEncoder().encode(body)
+    private func request<Response: Decodable>(
+        peer: Peer,
+        path: String,
+        method: String
+    ) async throws -> Response {
+        var urlRequest = URLRequest(url: url(for: peer, path: path))
+        urlRequest.httpMethod = method
+        if let token {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
 
-        let (data, _) = try await session.data(for: request)
-        return try JSONDecoder().decode(AgentResponse.self, from: data)
+        let (data, response) = try await session.data(for: urlRequest)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    private func request<RequestBody: Encodable, Response: Decodable>(
+        peer: Peer,
+        path: String,
+        method: String,
+        body: RequestBody
+    ) async throws -> Response {
+        var urlRequest = URLRequest(url: url(for: peer, path: path))
+        urlRequest.httpMethod = method
+        if let token {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await session.data(for: urlRequest)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    private func validate(response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw AgentClientError.invalidResponse
+        }
+        guard (200 ..< 300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            logger.error("Agent request failed with HTTP \(http.statusCode, privacy: .public)")
+            throw AgentClientError.httpStatus(http.statusCode, body)
+        }
     }
 }
