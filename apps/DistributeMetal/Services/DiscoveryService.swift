@@ -27,6 +27,7 @@ final class DiscoveryService: ObservableObject {
     private let queue = DispatchQueue(label: "one.measured.distribute-metal.discovery", qos: .userInitiated)
     private let client = AgentClient()
     private var probeTask: Task<Void, Never>?
+    private var advertisingTask: Task<Void, Never>?
     private var inFlightProbeKeys: Set<String> = []
 
     private init() {}
@@ -34,6 +35,8 @@ final class DiscoveryService: ObservableObject {
     // MARK: - Advertise
 
     func startAdvertising() {
+        advertisingTask?.cancel()
+
         if let dnssdProcess, dnssdProcess.isRunning {
             dnssdProcess.terminate()
         }
@@ -42,37 +45,50 @@ final class DiscoveryService: ObservableObject {
         let name = NetworkUtils.sanitizedComputerName
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let ip = NetworkUtils.localIPAddress ?? "unknown"
+        let serviceType = self.serviceType
+        let port = String(agentPort.rawValue)
 
-        cleanupStaleAdvertisers()
+        advertisingTask = Task {
+            let stalePIDs = await Task.detached(priority: .utility) {
+                Self.staleAdvertiserPIDs(serviceType: serviceType, port: port)
+            }.value
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
-        process.arguments = [
-            "-R", name, serviceType, "local.", "\(agentPort)",
-            "ver=\(version)",
-            "arch=arm64",
-            "ip=\(ip)"
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] terminated in
-            Task { @MainActor in
-                if self?.dnssdProcess?.processIdentifier == terminated.processIdentifier {
-                    self?.dnssdProcess = nil
+            guard !Task.isCancelled else { return }
+
+            cleanupStaleAdvertisers(stalePIDs)
+            guard !Task.isCancelled else { return }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
+            process.arguments = [
+                "-R", name, serviceType, "local.", port,
+                "ver=\(version)",
+                "arch=arm64",
+                "ip=\(ip)"
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { [weak self] terminated in
+                Task { @MainActor in
+                    if self?.dnssdProcess?.processIdentifier == terminated.processIdentifier {
+                        self?.dnssdProcess = nil
+                    }
                 }
             }
-        }
 
-        do {
-            try process.run()
-            dnssdProcess = process
-            logger.info("Advertising as \(name) on \(self.serviceType)")
-        } catch {
-            logger.error("Failed to start dns-sd: \(error.localizedDescription)")
+            do {
+                try process.run()
+                dnssdProcess = process
+                logger.info("Advertising as \(name) on \(serviceType)")
+            } catch {
+                logger.error("Failed to start dns-sd: \(error.localizedDescription)")
+            }
         }
     }
 
     func stopAdvertising() {
+        advertisingTask?.cancel()
+        advertisingTask = nil
         if let p = dnssdProcess, p.isRunning { p.terminate() }
         dnssdProcess = nil
         logger.info("Stopped advertising")
@@ -375,8 +391,7 @@ final class DiscoveryService: ObservableObject {
         }
     }
 
-    private func cleanupStaleAdvertisers() {
-        let stalePIDs = staleAdvertiserPIDs()
+    private func cleanupStaleAdvertisers(_ stalePIDs: [pid_t]) {
         guard !stalePIDs.isEmpty else { return }
 
         for pid in stalePIDs where kill(pid, SIGTERM) == 0 {
@@ -384,7 +399,8 @@ final class DiscoveryService: ObservableObject {
         }
     }
 
-    private func staleAdvertiserPIDs() -> [pid_t] {
+    private nonisolated static func staleAdvertiserPIDs(serviceType: String, port: String) -> [pid_t] {
+        let logger = Logger(subsystem: "one.measured.distribute-metal", category: "Discovery")
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -407,7 +423,6 @@ final class DiscoveryService: ObservableObject {
 
         let data = output.fileHandleForReading.readDataToEndOfFile()
         let text = String(decoding: data, as: UTF8.self)
-        let port = String(agentPort.rawValue)
 
         return text
             .split(separator: "\n")
