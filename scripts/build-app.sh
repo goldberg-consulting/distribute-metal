@@ -86,6 +86,17 @@ cat > "$APP_NAME.app/Contents/Info.plist" << EOF
 </dict></plist>
 EOF
 echo -n "APPL????" > "$APP_NAME.app/Contents/PkgInfo"
+
+# Bundle Python agent source
+echo -e "${BLUE}📦 Bundling agent...${NC}"
+AGENT_SRC="$PROJECT_ROOT/agent"
+AGENT_DEST="$APP_NAME.app/Contents/Resources/agent"
+mkdir -p "$AGENT_DEST"
+cp -R "$AGENT_SRC/src" "$AGENT_DEST/src"
+cp "$AGENT_SRC/pyproject.toml" "$AGENT_DEST/"
+cp "$AGENT_SRC/uv.lock" "$AGENT_DEST/"
+echo -e "${GREEN}✓ Agent bundled${NC}"
+
 echo -e "${GREEN}✓ Bundle${NC}"
 
 # Sign

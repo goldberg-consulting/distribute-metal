@@ -112,6 +112,16 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
 EOF
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
+# Bundle Python agent source
+echo -e "${BLUE}📦 Bundling agent...${NC}"
+AGENT_SRC="$PROJECT_ROOT/agent"
+AGENT_DEST="$APP_BUNDLE/Contents/Resources/agent"
+mkdir -p "$AGENT_DEST"
+cp -R "$AGENT_SRC/src" "$AGENT_DEST/src"
+cp "$AGENT_SRC/pyproject.toml" "$AGENT_DEST/"
+cp "$AGENT_SRC/uv.lock" "$AGENT_DEST/"
+echo -e "${GREEN}✓ Agent bundled${NC}"
+
 # Remove xattrs before signing
 echo -e "${BLUE}🧹 Removing xattrs from bundle...${NC}"
 find "$APP_BUNDLE" -type f -exec xattr -c {} \; 2>/dev/null || true
