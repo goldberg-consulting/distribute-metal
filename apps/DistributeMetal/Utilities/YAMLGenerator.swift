@@ -133,8 +133,9 @@ enum YAMLGenerator {
     }
 
     private static func workingDirectory(for entrypoint: String) -> String {
-        let directory = URL(fileURLWithPath: entrypoint).deletingLastPathComponent().path
-        return directory.isEmpty || directory == "/" ? "." : directory
+        let components = entrypoint.split(separator: "/").dropLast()
+        if components.isEmpty { return "." }
+        return components.joined(separator: "/")
     }
 
     private static func detectDataDirs(in url: URL) -> [String] {

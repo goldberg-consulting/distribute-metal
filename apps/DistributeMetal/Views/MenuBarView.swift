@@ -225,7 +225,7 @@ struct MenuBarView: View {
             do {
                 _ = try orchestrator.createJob(from: url, peers: peers)
             } catch {
-                print("Failed to load job spec: \(error)")
+                peerActionError = error.localizedDescription
             }
         }
     }
@@ -246,7 +246,7 @@ struct MenuBarView: View {
                     try yaml.write(to: yamlURL, atomically: true, encoding: .utf8)
                     _ = try orchestrator.createJob(from: yamlURL, peers: Array(discovery.discoveredPeers.values))
                 } catch {
-                    print("Failed to generate job spec: \(error)")
+                    peerActionError = error.localizedDescription
                 }
             }
         }
