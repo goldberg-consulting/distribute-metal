@@ -16,7 +16,17 @@ actor AgentClient {
     }
 
     private func url(for peer: Peer, path: String) -> URL {
-        URL(string: "http://\(peer.ipAddress):\(peer.port)\(path)")!
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = peer.ipAddress
+        components.port = peer.port
+
+        guard let baseURL = components.url,
+              let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+            preconditionFailure("Invalid peer address: \(peer.ipAddress):\(peer.port)")
+        }
+
+        return url
     }
 
     private static func loadToken() -> String? {
