@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import Combine
@@ -33,11 +34,16 @@ final class DiscoveryService: ObservableObject {
     // MARK: - Advertise
 
     func startAdvertising() {
-        guard dnssdProcess == nil else { return }
+        if let dnssdProcess, dnssdProcess.isRunning {
+            dnssdProcess.terminate()
+        }
+        dnssdProcess = nil
 
         let name = NetworkUtils.sanitizedComputerName
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let ip = NetworkUtils.localIPAddress ?? "unknown"
+
+        cleanupStaleAdvertisers()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
@@ -49,6 +55,13 @@ final class DiscoveryService: ObservableObject {
         ]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] terminated in
+            Task { @MainActor in
+                if self?.dnssdProcess?.processIdentifier == terminated.processIdentifier {
+                    self?.dnssdProcess = nil
+                }
+            }
+        }
 
         do {
             try process.run()
@@ -130,22 +143,25 @@ final class DiscoveryService: ObservableObject {
 
     func probeAllPeers() {
         probeTask?.cancel()
+        let peers = Array(discoveredPeers.values)
         probeTask = Task {
-            await withTaskGroup(of: (String, Peer?).self) { group in
-                for (ip, peer) in discoveredPeers {
+            await withTaskGroup(of: Peer.self) { group in
+                for peer in peers {
                     group.addTask { [client] in
                         do {
                             let status = try await client.fetchStatus(from: peer)
-                            return (ip, Self.updatedPeer(from: status, peer: peer))
+                            return Self.updatedPeer(from: status, peer: peer)
                         } catch {
-                            return (ip, Self.unreachablePeer(from: peer, error: error))
+                            return Self.unreachablePeer(from: peer, error: error)
                         }
                     }
                 }
-                for await (ip, peer) in group {
-                    if let peer {
-                        discoveredPeers[ip] = peer
-                    }
+                for await peer in group {
+                    let currentKey = existingPeerKey(
+                        for: peer.hostname,
+                        ip: normalizedAddress(peer.ipAddress)
+                    ) ?? peerKey(for: peer.ipAddress)
+                    discoveredPeers[currentKey] = mergedPeer(current: discoveredPeers[currentKey], with: peer)
                 }
             }
         }
@@ -269,6 +285,10 @@ final class DiscoveryService: ObservableObject {
     private func mergedPeer(current: Peer?, with probed: Peer) -> Peer {
         guard var current else { return probed }
 
+        if isStaleProbeFailure(current: current, probed: probed) {
+            return current
+        }
+
         current.status = probed.status
         current.arch = probed.arch ?? current.arch
         current.chip = probed.chip ?? current.chip
@@ -282,6 +302,12 @@ final class DiscoveryService: ObservableObject {
         current.statusDetail = probed.statusDetail
         current.lastSeen = probed.lastSeen
         return current
+    }
+
+    private func isStaleProbeFailure(current: Peer, probed: Peer) -> Bool {
+        guard probed.status == .unreachable else { return false }
+        guard current.status != .unreachable else { return false }
+        return current.ipAddress.caseInsensitiveCompare(probed.ipAddress) != .orderedSame
     }
 
     private func handleBrowseResults(_ results: Set<NWBrowser.Result>) {
@@ -303,12 +329,13 @@ final class DiscoveryService: ObservableObject {
             let ver = normalizedAddress(txtFields["ver"])
             if let localIP, ip == localIP { continue }
 
-            let address = ip ?? hostname
-            let key = peerKey(for: address)
-            let previousKey = existingPeerKey(for: hostname, ip: ip) ?? key
+            let previousKey = existingPeerKey(for: hostname, ip: ip) ?? peerKey(for: hostname)
             let previousPeer = discoveredPeers[previousKey]
+            let previousAddress = normalizedAddress(previousPeer?.ipAddress)
+            let address = ip ?? previousAddress ?? hostname
+            let key = peerKey(for: address)
             let shouldProbe = previousPeer == nil
-                || previousPeer?.ipAddress != address
+                || previousAddress != address
                 || previousPeer?.status == .unreachable
 
             var peer = previousPeer ?? Peer(
@@ -346,6 +373,62 @@ final class DiscoveryService: ObservableObject {
                 scheduleProbe(for: peer)
             }
         }
+    }
+
+    private func cleanupStaleAdvertisers() {
+        let stalePIDs = staleAdvertiserPIDs()
+        guard !stalePIDs.isEmpty else { return }
+
+        for pid in stalePIDs where kill(pid, SIGTERM) == 0 {
+            logger.info("Stopped stale dns-sd advertiser pid \(pid, privacy: .public)")
+        }
+    }
+
+    private func staleAdvertiserPIDs() -> [pid_t] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,command="]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            logger.error("Failed to inspect dns-sd registrations: \(error.localizedDescription)")
+            return []
+        }
+
+        guard process.terminationStatus == 0 else {
+            logger.error("Process scan exited with status \(process.terminationStatus, privacy: .public)")
+            return []
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let text = String(decoding: data, as: UTF8.self)
+        let port = String(agentPort.rawValue)
+
+        return text
+            .split(separator: "\n")
+            .compactMap { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return nil }
+
+                let fields = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+                guard fields.count == 2, let pid = Int32(String(fields[0])) else { return nil }
+
+                let command = String(fields[1])
+                let commandFields = command.split(whereSeparator: \.isWhitespace)
+                guard pid != ProcessInfo.processInfo.processIdentifier else { return nil }
+                guard commandFields.count >= 6 else { return nil }
+                guard commandFields[0].hasSuffix("dns-sd") else { return nil }
+                guard commandFields[1] == "-R" else { return nil }
+                guard commandFields[3] == Substring(serviceType) else { return nil }
+                guard commandFields[4] == "local." else { return nil }
+                guard commandFields[5] == Substring(port) else { return nil }
+                return pid
+            }
     }
 
     // MARK: - Manual add
