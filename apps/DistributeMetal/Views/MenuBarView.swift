@@ -5,6 +5,7 @@ struct MenuBarView: View {
     @EnvironmentObject var orchestrator: JobOrchestrator
 
     @State private var showAddPeer = false
+    @State private var peerActionError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +20,14 @@ struct MenuBarView: View {
         .frame(width: 360)
         .sheet(isPresented: $showAddPeer) {
             AddPeerSheet(discovery: discovery)
+        }
+        .alert("Peer Action Failed", isPresented: Binding(
+            get: { peerActionError != nil },
+            set: { if !$0 { peerActionError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(peerActionError ?? "Unknown error")
         }
     }
 
@@ -95,7 +104,19 @@ struct MenuBarView: View {
                 .padding(.vertical, 8)
             } else {
                 ForEach(Array(discovery.discoveredPeers.values).sorted(by: { $0.name < $1.name }), id: \.id) { peer in
-                    PeerRow(peer: peer) {
+                    PeerRow(
+                        peer: peer,
+                        isBenchmarking: discovery.benchmarkingPeerIDs.contains(peer.id),
+                        onBenchmark: {
+                            Task {
+                                do {
+                                    try await discovery.benchmarkPeer(peer)
+                                } catch {
+                                    peerActionError = error.localizedDescription
+                                }
+                            }
+                        }
+                    ) {
                         discovery.removePeer(ip: peer.ipAddress)
                     }
                 }

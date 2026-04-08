@@ -53,9 +53,9 @@ data: []
 
 # ── sync ─────────────────────────────────────────────────────────────────────
 sync:
-  mode: "bulk"                # bulk (parallel HTTP range fetch)
-  parallel_connections: 8     # concurrent download connections per worker
-  chunk_size_mb: 64           # per-range chunk size
+  mode: "rsync-push"          # rsync-push (coordinator-initiated SSH push)
+  parallel_connections: 8     # reserved for future multi-stream sync modes
+  chunk_size_mb: 64           # reserved for future chunked sync modes
   preferred_interface: "auto" # auto | thunderbolt | ethernet | wifi
 
 # ── cleanup ──────────────────────────────────────────────────────────────────

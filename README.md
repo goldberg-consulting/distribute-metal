@@ -20,7 +20,7 @@ A macOS menu bar app by [measured.one](https://measured.one) that turns a handfu
             distribute-metal.yaml
 ```
 
-Every Mac in the cluster runs the same two things: the **menu bar app** (coordinator UI) and the **Python agent** (HTTP worker on port 8477). Bonjour handles discovery. A shared token prevents unauthorized access. The MCP server lets AI agents in Cursor inspect the cluster and generate job specs.
+Every Mac in the cluster runs the **Python agent** (HTTP worker on port 8477). The **menu bar app** runs on the coordinator and may also run on workers if you want local visibility. Bonjour handles discovery. A shared token protects mutating agent routes. The MCP server is optional; it remains useful for Cursor-driven inspection and YAML generation, but secure sync and benchmarking no longer depend on it.
 
 ## Requirements
 
@@ -101,11 +101,22 @@ Peers find each other in two ways:
 
 2. **Manual.** Click **+** in the peers section and enter an IP address. Useful for machines on different subnets.
 
-Each discovered peer is immediately probed via `GET /status` to verify the agent is running and to pull hardware info (chip, memory, macOS version, mccl version, disk space). Peers show as **ready**, **busy**, or **offline**.
+Each discovered peer is immediately probed via `GET /status` to verify the agent is running and to pull hardware info (chip, memory, macOS version, mccl version, disk space). A peer can therefore be:
 
-## Step 4: Check the cluster with MCP
+- **discovered**: visible on Bonjour, probe not completed yet
+- **unreachable**: visible on Bonjour, but the agent probe failed
+- **agent failed**: the agent answered, but reported a failed state
+- **ready** or **busy**: the agent answered and is healthy enough to classify
 
-The MCP server is the AI-powered layer for cluster inspection and job setup. It runs inside Cursor and is configured automatically via `.cursor/mcp.json`.
+## Step 3b: Secure sync access
+
+Before the first push sync, the coordinator authorizes a per-worker SSH key on that worker. The key is restricted to a single forced `rsync --server` command rooted under the DistributeMetal workspace, so it can accept inbound job files but cannot be used by that worker to browse the coordinator's live source directory.
+
+This bootstrap happens automatically when you run a job. The peer row context menu can also run a **Test Link** action, which exercises the real peer-to-peer network path using the worker agents.
+
+## Step 4: Check the cluster with MCP (optional)
+
+The MCP server is the AI-powered layer for cluster inspection and job setup. It runs inside Cursor and is configured automatically via `.cursor/mcp.json`. You do not need it to pair workers, sync code, run jobs, or benchmark the network path.
 
 **What the MCP can see:**
 
@@ -178,6 +189,8 @@ version: 1
 
 project:
   name: my-training-run
+  root: .
+  working_dir: .
   entrypoint: train.py
   include:
     - "**/*.py"
@@ -202,7 +215,7 @@ training:
 data: []
 
 sync:
-  mode: bulk
+  mode: rsync-push
   parallel_connections: 8
 
 cleanup:
@@ -234,11 +247,19 @@ sequenceDiagram
     participant A2 as Agent rank 1
 
     U->>C: Open YAML, click Run
+    par Initialize
+        C->>A1: POST /jobs/init
+        C->>A2: POST /jobs/init
+    end
+    par Sync
+        C->>A1: SSH bootstrap + rsync push
+        C->>A2: SSH bootstrap + rsync push
+    end
     par Prepare
         C->>A1: POST /jobs/prepare
         C->>A2: POST /jobs/prepare
     end
-    Note over A1,A2: Create workspace, uv sync
+    Note over A1,A2: Promote synced files, then uv sync
     loop Poll until ready
         C->>A1: GET /status
         C->>A2: GET /status
@@ -251,9 +272,11 @@ sequenceDiagram
     U->>C: Stop / Clean when done
 ```
 
-**Prepare:** each agent creates a workspace at `~/Library/Application Support/DistributeMetal/jobs/<job_id>/`, provisions a `uv` virtual environment from `pyproject.toml`.
+**Initialize + sync:** the coordinator creates a per-job workspace on each worker, bootstraps a restricted SSH push key, and pushes a filtered copy of the project and coordinator-sourced data into the worker job workspace via `rsync` over SSH. Workers never receive credentials that let them read back into the coordinator's live project tree.
 
-**Launch:** each agent starts `torchrun` with `--node_rank`, `--master_addr`, `--master_port`, `--world_size`. MCCL handles gradient all-reduce over Metal.
+**Prepare:** each agent promotes the synced files into `~/Library/Application Support/DistributeMetal/jobs/<job_id>/`, then provisions a `uv` virtual environment from the synced `pyproject.toml`.
+
+**Launch:** each agent starts `torchrun` with the entrypoint, working directory, environment, and script arguments from the job spec. MCCL handles gradient all-reduce over Metal.
 
 **Clean:** when finished, click **Clean** to remove workspaces from all peers.
 
@@ -313,10 +336,10 @@ measured.one.distribute-metal/
 └── LICENSE                   # MIT
 ```
 
-## Current limitations (v0.1)
+## Current limitations
 
-- **No automatic code sync.** Project source must be present at each agent's workspace before running. Use `rsync`, a shared volume, or copy manually. Bundle upload is defined but not yet implemented.
-- **Entrypoint is fixed at `train.py`.** The agent does not yet read `project.entrypoint` from the YAML spec.
+- **Sync currently uses coordinator-driven rsync over SSH.** There is still no worker-side pull mode or shared-volume abstraction; the coordinator must be able to reach each worker over SSH.
+- **Bundle upload remains unimplemented.** The HTTP bundle endpoint is still a placeholder because the secure path is rsync push, not agent-hosted archive ingest.
 - **No completion polling from the UI.** The coordinator does not automatically detect when training finishes.
 - **MCP peer list is static.** The MCP reads peers from a YAML file rather than from Bonjour. Bonjour-discovered peers in the menu bar app are not automatically synced to the MCP config.
 

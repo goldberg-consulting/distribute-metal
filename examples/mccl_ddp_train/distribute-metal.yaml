@@ -37,7 +37,7 @@ training:
 data: []
 
 sync:
-  mode: bulk
+  mode: rsync-push
   parallel_connections: 4
   chunk_size_mb: 64
   preferred_interface: auto

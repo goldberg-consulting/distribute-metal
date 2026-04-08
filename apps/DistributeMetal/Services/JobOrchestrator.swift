@@ -2,12 +2,19 @@ import Foundation
 import os.log
 import Combine
 
+/// Coordinates the worker lifecycle for a single job.
+///
+/// The run sequence is: authorize restricted SSH push access, initialize worker
+/// workspaces, rsync the staged project and data, prepare/provision, poll until
+/// ready, then launch `torchrun` with rank-specific parameters.
 @MainActor
 final class JobOrchestrator: ObservableObject {
     static let shared = JobOrchestrator()
 
     private let logger = Logger(subsystem: "one.measured.distribute-metal", category: "Orchestrator")
     private let client = AgentClient()
+    private let sshService = SSHService.shared
+    private let syncService = RsyncService.shared
 
     @Published var currentJob: Job?
     @Published var jobHistory: [Job] = []
@@ -40,39 +47,29 @@ final class JobOrchestrator: ObservableObject {
             logger.error("No current job to run")
             return
         }
-
-        let masterPeer = job.assignedPeers[0]
-        let masterAddr = masterPeer.ipAddress
-        let masterPort = job.spec.training.torchrun.masterPort ?? 29500
+        guard !job.assignedPeers.isEmpty else {
+            logger.error("No peers assigned to job")
+            appendLog("Job failed: no peers assigned.")
+            return
+        }
 
         do {
-            // Phase: prepare all peers
+            // Phase: initialize sync + prepare all peers
             job.phase = .syncing
             currentJob = job
-            appendLog("Preparing \(job.assignedPeers.count) peers...")
+            appendLog("Initializing secure sync for \(job.assignedPeers.count) peer(s)...")
 
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for peer in job.assignedPeers {
-                    group.addTask {
-                        let resp = try await self.client.prepare(
-                            peer: peer,
-                            jobId: job.id.uuidString,
-                            spec: job.spec
-                        )
-                        if !resp.ok {
-                            throw OrchestratorError.prepareFailed(peer: peer.name, message: resp.message ?? "unknown")
-                        }
-                    }
-                }
-                try await group.waitForAll()
-            }
+            let preparedPeers = try await preparePeersForRun(job: job)
+            job.assignedPeers = preparedPeers
+            job.masterPeer = preparedPeers.first
+            currentJob = job
 
             appendLog("All peers prepared. Waiting for ready state...")
 
             // Phase: wait for all peers to be ready (provisioned)
             job.phase = .provisioning
             currentJob = job
-            try await waitForAllReady(peers: job.assignedPeers, jobId: job.id.uuidString, timeout: 300)
+            try await waitForAllReady(peers: preparedPeers, jobId: job.id.uuidString, timeout: 300)
 
             // Phase: barriered launch
             job.phase = .launching
@@ -80,8 +77,12 @@ final class JobOrchestrator: ObservableObject {
             currentJob = job
             appendLog("Launching torchrun across \(job.worldSize) rank(s)...")
 
+            let masterPeer = preparedPeers[0]
+            let masterAddr = masterPeer.ipAddress
+            let masterPort = job.spec.training.torchrun.masterPort ?? 29500
+
             try await withThrowingTaskGroup(of: Void.self) { group in
-                for (idx, peer) in job.assignedPeers.enumerated() {
+                for (idx, peer) in preparedPeers.enumerated() {
                     let req = LaunchRequest(
                         jobId: job.id.uuidString,
                         masterAddr: masterAddr,
@@ -155,6 +156,57 @@ final class JobOrchestrator: ObservableObject {
 
     // MARK: - Helpers
 
+    private func preparePeersForRun(job: Job) async throws -> [Peer] {
+        let client = self.client
+        let sshService = self.sshService
+        let syncService = self.syncService
+
+        return try await withThrowingTaskGroup(of: Peer.self) { group in
+            for peer in job.assignedPeers {
+                group.addTask {
+                    let preparedPeer = try await sshService.configurePushAccess(for: peer, client: client)
+                    await MainActor.run {
+                        DiscoveryService.shared.updatePeer(preparedPeer)
+                    }
+
+                    let initResponse = try await client.initializeJob(
+                        peer: preparedPeer,
+                        jobId: job.id.uuidString,
+                        spec: job.spec
+                    )
+                    if !initResponse.ok {
+                        throw OrchestratorError.syncFailed(peer: peer.name, message: initResponse.message ?? "job init failed")
+                    }
+
+                    try syncService.sync(job: job, to: preparedPeer)
+
+                    let prepareResponse = try await client.prepare(
+                        peer: preparedPeer,
+                        jobId: job.id.uuidString
+                    )
+                    if !prepareResponse.ok {
+                        throw OrchestratorError.prepareFailed(peer: peer.name, message: prepareResponse.message ?? "prepare failed")
+                    }
+
+                    await MainActor.run {
+                        DiscoveryService.shared.updatePeer(preparedPeer)
+                    }
+                    return preparedPeer
+                }
+            }
+
+            var preparedPeers: [Peer] = []
+            for try await peer in group {
+                preparedPeers.append(peer)
+            }
+
+            let order = job.assignedPeers.map(\.id)
+            return preparedPeers.sorted { left, right in
+                order.firstIndex(of: left.id) ?? 0 < order.firstIndex(of: right.id) ?? 0
+            }
+        }
+    }
+
     private func waitForAllReady(peers: [Peer], jobId: String, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
 
@@ -184,6 +236,7 @@ final class JobOrchestrator: ObservableObject {
 }
 
 enum OrchestratorError: LocalizedError {
+    case syncFailed(peer: String, message: String)
     case prepareFailed(peer: String, message: String)
     case launchFailed(peer: String, message: String)
     case peerFailed(peer: String)
@@ -191,6 +244,7 @@ enum OrchestratorError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .syncFailed(let p, let m): return "Sync failed on \(p): \(m)"
         case .prepareFailed(let p, let m): return "Prepare failed on \(p): \(m)"
         case .launchFailed(let p, let m): return "Launch failed on \(p): \(m)"
         case .peerFailed(let p): return "Peer \(p) entered failed state"
